@@ -136,3 +136,35 @@ def test_stdin_that_cant_be_watched_fails_safe(monkeypatch):
     with pytest.raises(align.AlignError, match="Nothing moved"):
         align.live_align(Still(READY), follower, out=io.StringIO())
     assert follower.commands == []
+
+
+class TTY(io.StringIO):
+    def isatty(self):
+        return True
+
+
+def test_terminal_redraws_in_place_on_the_alternate_screen():
+    out = TTY()
+    align.live_align(Still(READY), Still(READY), enter=presses(False, False, False, True), out=out, max_s=5)
+    text = out.getvalue()
+    assert text.startswith(align.ALT_SCREEN_ON)
+    assert text.count(align.HOME) == 4                      # one frame per refresh, drawn from the top
+    screen, after = text.split(align.ALT_SCREEN_OFF)
+    assert "joint" in after and after.rstrip().endswith("Starting.")   # last table left on the normal screen
+
+
+def test_ctrl_c_still_restores_the_normal_screen():
+    out = TTY()
+
+    def ctrl_c(timeout_s):
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        align.live_align(Still(READY), Still(READY), enter=ctrl_c, out=out)
+    assert align.ALT_SCREEN_OFF in out.getvalue()
+
+
+def test_not_a_terminal_prints_only_when_the_table_changes():
+    out = io.StringIO()
+    align.live_align(Still(READY), Still(READY), enter=presses(*[False] * 20, True), out=out, max_s=5)
+    assert out.getvalue().count("joint ") == 1                # 21 refreshes, one unchanged table

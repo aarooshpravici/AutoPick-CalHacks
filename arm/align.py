@@ -64,34 +64,53 @@ def _enter_from_stdin(timeout_s: float) -> bool:
     return True
 
 
+ALT_SCREEN_ON = "\x1b[?1049h\x1b[?25l"      # full-screen view, cursor hidden
+ALT_SCREEN_OFF = "\x1b[?25h\x1b[?1049l"     # back to the normal screen, cursor shown
+HOME, CLEAR_LINE_END, CLEAR_BELOW = "\x1b[H", "\x1b[K", "\x1b[J"
+
+
 def live_align(leader, follower, *, enter=None, out=None, max_s: float | None = None) -> None:
     """Show the live table until Enter is pressed with every joint matching. Never commands
     the follower. enter(timeout_s) -> bool reports an Enter (default: stdin). max_s, if given,
-    gives up with AlignError after that long (for tests and scripts)."""
+    gives up with AlignError after that long (for tests and scripts).
+
+    In a terminal the table is drawn on the alternate screen and redrawn in place, so the
+    numbers update rather than scroll (long lines can wrap in a narrow window without
+    breaking it). On the way out, by Enter, error or Ctrl-C, the normal screen comes back
+    with the last table printed once. Anywhere else (a pipe, a test) it prints a table only
+    when it changes."""
     enter = enter or _enter_from_stdin
     out = out or sys.stdout
+    tty = bool(getattr(out, "isatty", lambda: False)())
     period = 1.0 / REFRESH_HZ
-    drawn = 0
     rejected = False
+    last = None
     t0 = time.monotonic()
-    while True:
-        lead, foll = leader.read(), follower.read()
-        lines = table(lead, foll)
-        if rejected:
-            lines.append("Not yet: some joints don't match.")
-        if drawn:
-            out.write(f"\x1b[{drawn}F\x1b[J")      # back to the top of the table, clear below
-        out.write("\n".join(lines) + "\n")
-        out.flush()
-        drawn = len(lines)
-        if enter(period):
-            if not mismatched(leader.read(), follower.read()):
-                out.write("Starting.\n")
-                out.flush()
-                return
-            rejected = True
-        if max_s is not None and time.monotonic() - t0 > max_s:
-            raise AlignError(f"the joints didn't match within {max_s:g} s; nothing moved")
+    if tty:
+        out.write(ALT_SCREEN_ON)
+    try:
+        while True:
+            lines = table(leader.read(), follower.read())
+            if rejected:
+                lines.append("Not yet: some joints don't match.")
+            if tty:
+                out.write(HOME + "".join(line + CLEAR_LINE_END + "\n" for line in lines) + CLEAR_BELOW)
+            elif lines != last:
+                out.write("\n".join(lines) + "\n")
+            out.flush()
+            last = lines
+            if enter(period):
+                if not mismatched(leader.read(), follower.read()):
+                    break
+                rejected = True
+            if max_s is not None and time.monotonic() - t0 > max_s:
+                raise AlignError(f"the joints didn't match within {max_s:g} s; nothing moved")
+    finally:
+        if tty:
+            out.write(ALT_SCREEN_OFF + ("\n".join(last) + "\n" if last else ""))
+            out.flush()
+    out.write("Starting.\n")
+    out.flush()
 
 
 def scripted_align(leader, follower) -> None:
