@@ -1,12 +1,13 @@
 """ACT grasp policy for pick.py (task T3, plan 10.2).
 
-    policy = pick.load_policy("data/checkpoints/020000/pretrained_model")   # opens robot.yaml webcams
+    policy = pick.load_policy("data/checkpoints/grasp_v1/020000/pretrained_model")   # opens robot.yaml webcams
     pick_to_tray(arm, poses, policy=policy)
 
-Loads a LeRobot checkpoint (weights plus its saved pre/post-processors) onto the
-Mac's GPU (mps), and turns each arm state plus camera frames into joint targets,
-the step(state) interface pick.py drives. Camera names must match the ones the
-demos were recorded with (robot.yaml `cameras`: wrist, scene).
+Loads a LeRobot checkpoint (weights plus its saved pre/post-processors; training/remote.sh
+pull NAME puts each in data/checkpoints/NAME/STEP/pretrained_model) onto the Mac's GPU
+(mps), and turns each arm state plus camera frames into joint targets, the step(state)
+interface pick.py drives. Camera names must match the ones the demos were recorded
+with (robot.yaml `cameras`: wrist, scene).
 
 Cameras are captured the way training/record.py (task T1) records them: LeRobot's
 OpenCV camera, RGB, at the checkpoint's image size (the dataset's, 320x180 by
