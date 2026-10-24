@@ -214,8 +214,22 @@ class _Picker:
         result["detail"] = "released over the tray"
 
 
-def load_policy(path):
-    raise NotImplementedError("loading an ACT checkpoint is task T3")
+def load_policy(path, cameras: dict | None = None, config_path: Path | None = None):
+    """Load an ACT checkpoint folder. Without `cameras`, opens the webcams named in
+    robot.yaml `cameras` that the checkpoint needs. Returns the policy; its cameras
+    are in policy.cameras (close them when done)."""
+    from .policy import ActGrasp, OpenCVFrames
+
+    if cameras is None:
+        indices = _load_config(config_path or REPO_ROOT / "config" / "robot.yaml").get("cameras", {})
+        with open(Path(path) / "config.json") as f:
+            needed = [k.removeprefix("observation.images.") for k in json.load(f)["input_features"]
+                      if k.startswith("observation.images.")]
+        missing = [n for n in needed if n not in indices]
+        if missing:
+            raise ValueError(f"robot.yaml cameras has no index for {missing}")
+        cameras = {n: OpenCVFrames(indices[n]) for n in needed}
+    return ActGrasp(path, cameras)
 
 
 def pick_to_tray(arm, poses, pan_deg=0.0, roll_deg=0.0, policy=None, speed_deg_s=45,
@@ -225,7 +239,8 @@ def pick_to_tray(arm, poses, pan_deg=0.0, roll_deg=0.0, policy=None, speed_deg_s
     if not 0 < speed_deg_s <= MAX_SPEED_DEG_S:
         raise ValueError(f"speed_deg_s must be in (0, {MAX_SPEED_DEG_S}]")
     poses_mod.validate(poses)
-    if isinstance(policy, (str, Path)):
+    opened = isinstance(policy, (str, Path))
+    if opened:
         policy = load_policy(policy)
     picker = _Picker(arm, poses, pan_deg, roll_deg, speed_deg_s, stop_event, log or (lambda msg: None))
     result = {"result": "in_tray", "grasp": "policy" if policy is not None else "scripted",
@@ -236,6 +251,10 @@ def pick_to_tray(arm, poses, pan_deg=0.0, roll_deg=0.0, policy=None, speed_deg_s
     except _Abort as abort:
         result["result"] = abort.result
         result["detail"] = abort.detail
+    finally:
+        if opened:
+            for cam in policy.cameras.values():
+                cam.close()
     result["seconds"] = round(picker.clock.now() - t0, 2)
     return result
 
@@ -270,25 +289,37 @@ def main(argv=None) -> int:
     signal.signal(signal.SIGINT, lambda *_: stop_event.set())
     log = lambda msg: print(msg, flush=True)
     arm = None
+    opened_cameras = {}
     try:
         cfg = _load_config(args.config).get("arm", {})
         speed = args.speed or cfg.get("move_speed_deg_s") or 25
+        policy = args.policy
         if args.dry_run:
             from .sim import DEFAULT_POSES, SimArm
             poses = poses_mod.load(args.poses) if args.poses.exists() else DEFAULT_POSES
             arm = SimArm(poses, miss_first=args.sim_miss, slip_on_lift=args.sim_slip,
                          stall_joint=args.sim_stall)
+            if policy:      # real checkpoint, grey camera frames
+                from .policy import BlankFrames
+                needed = json.loads((Path(policy) / "config.json").read_text())["input_features"]
+                policy = load_policy(policy, cameras={k.removeprefix("observation.images."): BlankFrames()
+                                                      for k in needed if k.startswith("observation.images.")})
         else:
             from .real import RealArm
             poses = poses_mod.load(args.poses)
             arm = RealArm(port=cfg["follower_port"], robot_id=cfg["follower_id"],
                           max_relative_target=cfg.get("max_relative_target_deg", 10))
-        result = pick_to_tray(arm, poses, pan_deg=args.pan, roll_deg=args.roll, policy=args.policy,
+            if policy:
+                policy = load_policy(policy, config_path=args.config)
+                opened_cameras = policy.cameras
+        result = pick_to_tray(arm, poses, pan_deg=args.pan, roll_deg=args.roll, policy=policy,
                               speed_deg_s=speed, stop_event=stop_event, log=log)
     except Exception as e:  # noqa: BLE001 - any failure must still end in a RESULT line
         result = {"result": "error", "grasp": "policy" if args.policy else "scripted",
                   "attempts": 0, "seconds": 0.0, "detail": f"{type(e).__name__}: {e}"}
     finally:
+        for cam in opened_cameras.values():
+            cam.close()
         if arm is not None:
             arm.close()
     print("RESULT " + json.dumps(result), flush=True)
