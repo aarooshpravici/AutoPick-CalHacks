@@ -130,6 +130,14 @@ training/remote.sh run data/datasets/grasp_v1 grasp_v1
 
 ## 8. Test a checkpoint (T5)
 
+First check it loads on this Mac: a simulated arm, but the real webcams and checkpoint. Nothing moves.
+
+```bash
+python -m arm.pick run --dry-run --policy data/checkpoints/grasp_v1/005000/pretrained_model
+```
+
+Then on the arm:
+
 ```bash
 python -m arm.pick run --policy data/checkpoints/grasp_v1/020000/pretrained_model --speed 25
 ```
