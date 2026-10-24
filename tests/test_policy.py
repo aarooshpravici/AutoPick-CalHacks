@@ -21,7 +21,7 @@ ROBOT_YAML = {
             "follower_id": "so101_follower_arm", "leader_id": "so101_leader_arm",
             "max_relative_target_deg": 10, "move_speed_deg_s": 45},
     "cameras": {"wrist": 1, "scene": 2, "mast_top": 3},
-    "handoff": {"timeout_s": 60},
+    "handoff": {"timeout_s": 60, "grip": "squeeze"},
 }
 
 
