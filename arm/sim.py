@@ -10,8 +10,6 @@ advances the simulation instead of waiting, so a whole pick takes milliseconds.
 
 from __future__ import annotations
 
-import time
-
 from . import poses as poses_mod
 from .poses import ARM_JOINTS, JOINTS
 
@@ -32,10 +30,9 @@ NEAR_DEG = 5.0
 
 
 class SimClock:
-    def __init__(self, arm: "SimArm", realtime: bool = False):
+    def __init__(self, arm: "SimArm"):
         self._arm = arm
         self.t = 0.0
-        self.realtime = realtime    # also wait for real (interactive dry runs)
 
     def now(self) -> float:
         return self.t
@@ -43,8 +40,6 @@ class SimClock:
     def sleep(self, dt: float) -> None:
         self._arm.step(dt)
         self.t += dt
-        if self.realtime:
-            time.sleep(dt)
 
 
 class SimArm:
