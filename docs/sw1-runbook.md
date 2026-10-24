@@ -109,11 +109,19 @@ python -m training.convert --src data/datasets/grasp_v1 --dst data/datasets/gras
 
 ## 7. 11:30: train on the PC (T5)
 
-Set the PC's address once per terminal. Check the GPU is free; `run` refuses if it's busy.
+The lab PC (RTX 5070 Ti, Ubuntu 22.04, shared account `keshav`) is reachable only from the university network, so turn on the university VPN at the venue. `remote.sh` uses its own folder, `~/floor-picker-train`, away from other projects. It checks the GPU is free and refuses to start over anyone's job. It never stores GitHub or Hugging Face tokens. Run these in a Terminal tab: Claude's sandboxed shell has no route to the PC.
 
 ```bash
-export FP_TRAIN_HOST=USER@PC-HOSTNAME
+export FP_TRAIN_HOST=keshav@10.193.169.55
 ```
+
+Check it's reachable first. If this times out, the VPN is off or the PC is asleep.
+
+```bash
+ssh -o BatchMode=yes -o ConnectTimeout=15 keshav@10.193.169.55 'nvidia-smi; command -v python3.12; git --version'
+```
+
+`setup` needs `python3.12` and `git` on the PC. Ubuntu 22.04 ships Python 3.10, so if `python3.12` is missing, tell Claude.
 
 ```bash
 training/remote.sh setup
