@@ -120,6 +120,19 @@ class SimArm:
         self.pos["gripper"] = g
 
 
+class SimLeader:
+    """A leader arm that stays where it's put: set .pos to "move" it."""
+
+    def __init__(self, pos: dict | None = None):
+        self.pos = dict(pos or DEFAULT_POSES["ready"])
+
+    def read(self) -> dict:
+        return dict(self.pos)
+
+    def close(self) -> None:
+        pass
+
+
 def _approach(value: float, goal: float, max_step: float) -> float:
     if abs(goal - value) <= max_step:
         return goal
