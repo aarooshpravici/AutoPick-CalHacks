@@ -9,6 +9,7 @@ import pytest
 import yaml
 
 import arm.real as real_mod
+from arm import align as align_mod
 import arm.teach as teach_mod
 from arm import pick, poses as poses_mod
 from arm.sim import DEFAULT_POSES, SimArm, SimLeader
@@ -409,6 +410,8 @@ def fake_hardware(monkeypatch):
     monkeypatch.setattr(real_mod, "RealLeader", FakeRealLeader)
     monkeypatch.setattr(real_mod, "RealArm", FakeRealArm)
     monkeypatch.setattr(teach_mod, "enter_waiter", person)
+    # The person also lines the leader up with the follower before teaching starts (arm/align.py).
+    monkeypatch.setattr(align_mod, "live_align", align_mod.scripted_align)
     return hw
 
 

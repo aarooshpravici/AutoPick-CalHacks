@@ -2,8 +2,10 @@
 
     python -m arm.teach [--out PATH] [--speed DEG_S] [--config PATH] [--with-tray] [--dry-run]
 
-The follower copies the leader, speed-capped. The person moves the leader and
-presses Enter at each step; the follower's position is recorded (it's what
+First a live table lines the arms up (arm/align.py): the follower holds still while
+the person moves the leader to match it, and Enter starts only once every joint
+matches. Then the follower copies the leader, speed-capped. The person moves the
+leader and presses Enter at each step; the follower's position is recorded (it's what
 pick.py will command). Saves config/poses.json, then reloads it to check. An
 existing file is backed up to data/poses_backup/ first.
 
@@ -31,6 +33,7 @@ import threading
 import time
 from pathlib import Path
 
+from . import align as align_mod
 from . import poses as poses_mod
 from .pick import (DEFAULT_CONFIG_PATH, MAX_SPEED_DEG_S, RATE_HZ, RealClock, _is_number,
                    load_arm_config, resolve_speed)
@@ -149,15 +152,19 @@ def _same_pose(a: dict, b: dict) -> bool:
 
 
 def teach(leader, follower, speed_deg_s: float, wait_for=enter_waiter, log=print,
-          with_tray: bool = False) -> dict:
+          with_tray: bool = False, align=None) -> dict:
     """Mirror leader -> follower at speed_deg_s; record the follower at each step.
 
     wait_for(step, prompt) returns an object whose is_set() is polled every tick and turns
-    true when the person pressed Enter. with_tray also teaches above_tray. Returns the
-    validated poses (raises PosesError)."""
+    true when the person pressed Enter. with_tray also teaches above_tray. align(leader,
+    follower), if given, runs first, before the follower is ever commanded (main passes the
+    live table for real arms). Returns the validated poses (raises PosesError)."""
     if not (_is_number(speed_deg_s) and 0 < speed_deg_s <= MAX_SPEED_DEG_S):
         raise ValueError(f"speed_deg_s must be in (0, {MAX_SPEED_DEG_S:g}] deg/s (plan section 17), "
                          f"got {speed_deg_s!r}")
+    if align is not None:
+        _flush_stdin()
+        align(leader, follower)
     clock = getattr(follower, "clock", None) or RealClock()
     dt = 1.0 / RATE_HZ
     max_step = speed_deg_s * dt
@@ -256,6 +263,7 @@ def main(argv=None) -> int:
             from .sim import DEFAULT_POSES, SimArm, SimLeader
             follower, leader = SimArm(), SimLeader()
             wait_for = scripted_waiter(leader, follower, dry_run_targets(DEFAULT_POSES, args.with_tray))
+            align = align_mod.scripted_align
         else:
             from .real import RealArm, RealLeader
             # The leader is read-only, so open it first: if it fails, the follower is never touched.
@@ -263,13 +271,14 @@ def main(argv=None) -> int:
             follower = RealArm(port=cfg["follower_port"], robot_id=cfg["follower_id"],
                                max_relative_target=cfg["max_relative_target_deg"])
             wait_for = enter_waiter
+            align = align_mod.live_align
         print(f"teaching at {speed:g} deg/s" + (" (dry run, no hardware)" if args.dry_run else ""),
               flush=True)
-        poses = teach(leader, follower, speed, wait_for=wait_for, with_tray=args.with_tray)
+        poses = teach(leader, follower, speed, wait_for=wait_for, with_tray=args.with_tray, align=align)
     except KeyboardInterrupt:
         _error("\nstopped; nothing saved")
         return 1
-    except (poses_mod.PosesError, TeachError) as e:
+    except (poses_mod.PosesError, TeachError, align_mod.AlignError) as e:
         _error(f"not saved: {e}")
         return 1
     except Exception as e:  # noqa: BLE001 - a clear message, and the arms still get closed
