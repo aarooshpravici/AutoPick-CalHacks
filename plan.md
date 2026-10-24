@@ -176,13 +176,13 @@ block-beta
 
 | Item | Size or position | Why |
 |---|---|---|
-| Deck | About **40 × 30 cm** (length × width), 8–12 cm off the floor | Fits the MacBook on board and keeps a 1 m mast stable. Narrower than 28 cm wobbles. |
+| Deck | **Built: about 60 × 38 cm** (23.7 × 15 in, length × width), top about **7 cm** (2.75 in) off the floor once the wheels are on. The plan asked for at least 40 × 30 cm and 8–12 cm. | Fits the MacBook on board, with room for the stretch mast. Narrower than 28 cm wobbles. The arm's mount height is fixed by the A5 reach test and must not change after 09:00 Sat. |
 | Drive wheels | Two NEMA 17 steppers, axle about 5 cm from the front edge | Arm weight presses them into the floor; the robot pivots near the arm and front camera. |
 | Casters | **Two**, at the back corners, set 1–2 mm higher than the drive wheels | A wide base under the mast; the drive wheels always keep their grip. |
 | Arm | Front, centred, between or just behind the drive wheels | Its reach to the floor hangs out past the front as little as possible. |
 | Mast and tray (stretch) | Back, centred; tray on the arm's side of the mast | Only if the tray lift is built: the arm can drop into the tray at its lowest position. |
 | Heavy parts | MacBook (and a battery, if used) low, between the axle and the casters | The MacBook stays on board and is the arm's counterweight, balancing the arm reaching forward. |
-| Turning | The back sweeps a circle about 76 cm across when pivoting | Turn slowly near people and furniture. |
+| Turning | With the axle near the front, the back of the 60 cm deck sweeps a circle about 1.15 m across when pivoting (estimate) | Turn slowly near people and furniture, and leave room near the chair. |
 
 ### 6.2 Heights (side view, not to scale)
 
@@ -353,7 +353,7 @@ base:
   serial_port: /dev/tty.usbserial-XXXX
   baud: 115200
   wheel_diameter_mm: 72
-  track_width_mm: 260                      # measure on the built base
+  track_width_mm: 260                      # measure on the built base (wheel centre to centre; the deck is 38 cm wide)
   max_speed_mm_s: 200
 perception:
   detections_udp: 127.0.0.1:5601
@@ -786,7 +786,7 @@ IDs are referenced on the board. **Depends on** must be done first. Gate tasks (
 
 | Part | Qty | Spec | Status |
 |---|---|---|---|
-| Deck | 1 | 40 × 30 cm, plywood, acrylic or 2020 frame | Decided (material Open, D6) |
+| Deck | 1 | Built: about 60 × 38 cm, top about 7 cm off the floor | Have |
 | NEMA 17 steppers (drive) | 2 | 40–48 mm body, about 0.4 N·m | Decided |
 | TMC2209 drivers (drive) | 2 | | Decided |
 | Wheels + hubs for 5 mm shafts | 2 | 72–90 mm | Decided |
