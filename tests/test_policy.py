@@ -561,3 +561,30 @@ def test_cli_real_policy_mode_closes_cameras(fakes, tmp_path, capsys, monkeypatc
     else:
         assert (rc, result["result"]) == (0, "taken")      # hand mode is the default (A7)
     assert len(opened()) == 2 and sorted(closed()) == [("close", 1), ("close", 2)]
+
+
+class _Loaded(Exception):
+    pass
+
+
+@pytest.mark.parametrize("entry", [pick.pick_to_hand, pick.pick_to_tray])
+@pytest.mark.parametrize("size", [None, (640, 360)])
+def test_pick_passes_camera_size_to_load_policy(monkeypatch, tmp_path, entry, size):
+    """A wrist webcam that can only record 640x360 must still run a 320x180 checkpoint."""
+    seen = {}
+
+    def fake_load(path, **kw):
+        seen.update(kw)
+        raise _Loaded
+
+    monkeypatch.setattr(pick, "load_policy", fake_load)
+    poses = dict(DEFAULT_POSES)
+    with pytest.raises(_Loaded):
+        entry(SimArm(), poses, policy=tmp_path, camera_size=size)
+    assert seen.get("capture_size") == size
+
+
+@pytest.mark.parametrize("entry", [pick.pick_to_hand, pick.pick_to_tray])
+def test_camera_size_without_a_checkpoint_is_an_error(entry):
+    with pytest.raises(ValueError, match="camera_size"):
+        entry(SimArm(), dict(DEFAULT_POSES), policy=None, camera_size=(640, 360))

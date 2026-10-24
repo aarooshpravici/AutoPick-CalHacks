@@ -448,10 +448,12 @@ def load_policy(path, cameras: dict | None = None, config_path: str | Path | Non
         raise
 
 
-def _pick(mode, sequence, arm, poses, pan_deg, roll_deg, policy, speed_deg_s, stop_event, log) -> dict:
+def _pick(mode, sequence, arm, poses, pan_deg, roll_deg, policy, speed_deg_s, stop_event, log,
+          camera_size=None) -> dict:
     """Shared by pick_to_hand and pick_to_tray. Checks the arguments and the poses `mode`
     needs before anything moves, then runs sequence(picker, policy, result).
-    policy may be a checkpoint folder: its webcams are opened here and closed at the end."""
+    policy may be a checkpoint folder: its webcams are opened here and closed at the end,
+    at camera_size (width, height) if given, else at the checkpoint's image size."""
     if not (_is_number(speed_deg_s) and 0 < speed_deg_s <= MAX_SPEED_DEG_S):
         raise ValueError(f"speed_deg_s must be in (0, {MAX_SPEED_DEG_S:g}] deg/s (plan section 17), "
                          f"got {speed_deg_s!r}")
@@ -460,8 +462,10 @@ def _pick(mode, sequence, arm, poses, pan_deg, roll_deg, policy, speed_deg_s, st
             raise ValueError(f"{name} must be a finite number, got {value!r}")
     poses_mod.validate(poses, mode)
     opened = isinstance(policy, (str, Path))
+    if camera_size is not None and not opened:
+        raise ValueError("camera_size only applies when policy is a checkpoint folder")
     if opened:
-        policy = load_policy(policy)    # closes its own cameras if it fails
+        policy = load_policy(policy, capture_size=camera_size)    # closes its own cameras if it fails
     try:
         picker = _Picker(arm, poses, pan_deg, roll_deg, speed_deg_s, stop_event, log or (lambda msg: None))
         result = {"result": "taken" if mode == "hand" else "in_tray",
@@ -483,14 +487,16 @@ def _pick(mode, sequence, arm, poses, pan_deg, roll_deg, policy, speed_deg_s, st
 
 def pick_to_hand(arm, poses, pan_deg=0.0, roll_deg=0.0, policy=None, speed_deg_s=45,
                  handoff_timeout_s=60, stop_event: threading.Event | None = None, on_state=None,
-                 log=None, handoff_grip="squeeze") -> dict:
+                 log=None, handoff_grip="squeeze", camera_size=None) -> dict:
     """Pick the object at the parking spot, present it and wait for the person to take it.
     See the module docstring. Needs the `present` pose (not `above_tray`).
     stop_event: set it from another thread to stop; the arm holds where it is and keeps its
     claw target (squeezing, or the light hold while waiting).
     on_state(state) is called with "pick", "present" and "wait_for_take".
     handoff_grip: "squeeze" or "light", the grip while waiting at `present` (D9).
-    policy may be a checkpoint folder: its webcams are opened here and closed at the end."""
+    policy may be a checkpoint folder: its webcams are opened here and closed at the end.
+    camera_size: (width, height) to open them at when a webcam can't deliver the checkpoint's
+    image size itself (same aspect ratio; frames are resized as at recording)."""
     if not (_is_number(handoff_timeout_s) and handoff_timeout_s > 0):
         raise ValueError(f"handoff_timeout_s must be a positive number of seconds, got {handoff_timeout_s!r}")
     if not (isinstance(handoff_grip, str) and handoff_grip in HANDOFF_GRIPS):
@@ -498,16 +504,18 @@ def pick_to_hand(arm, poses, pan_deg=0.0, roll_deg=0.0, policy=None, speed_deg_s
     on_state = on_state or (lambda state: None)
     sequence = functools.partial(_Picker.run_hand, timeout_s=handoff_timeout_s, on_state=on_state,
                                  grip=handoff_grip)
-    return _pick("hand", sequence, arm, poses, pan_deg, roll_deg, policy, speed_deg_s, stop_event, log)
+    return _pick("hand", sequence, arm, poses, pan_deg, roll_deg, policy, speed_deg_s, stop_event, log,
+                 camera_size)
 
 
 def pick_to_tray(arm, poses, pan_deg=0.0, roll_deg=0.0, policy=None, speed_deg_s=45,
-                 stop_event: threading.Event | None = None, log=None) -> dict:
+                 stop_event: threading.Event | None = None, log=None, camera_size=None) -> dict:
     """Pick the object at the parking spot and drop it in the tray (stretch). See the module
     docstring. Needs the `above_tray` pose (not `present`).
     stop_event: set it from another thread to stop; the arm holds where it is.
     policy may be a checkpoint folder: its webcams are opened here and closed at the end."""
-    return _pick("tray", _Picker.run_tray, arm, poses, pan_deg, roll_deg, policy, speed_deg_s, stop_event, log)
+    return _pick("tray", _Picker.run_tray, arm, poses, pan_deg, roll_deg, policy, speed_deg_s, stop_event, log,
+                 camera_size)
 
 
 # --- configuration -----------------------------------------------------------
