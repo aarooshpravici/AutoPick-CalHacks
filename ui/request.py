@@ -1,16 +1,24 @@
 """Request parser (task U1, plan 9.6).
 
-    parse_request("I dropped my phone")  # -> {"action": "fetch", "item": "phone", "via": "claude"}
-    parse_request("stop!")               # -> {"action": "stop", "item": None, "via": "keyword"}
+    parse_request("I dropped my phone")  # -> {"action": "fetch", "item": "phone"}
+    parse_request("stop!")               # -> {"action": "stop", "item": None}
+    parse_request("I dropped my keys")   # -> {"action": "none", "item": None}
 
-1. STOP check first: "stop", "halt" or "freeze" anywhere returns stop, before any
-   network call.
-2. Otherwise ask Claude (claude-opus-5-5) with structured outputs: `item` is an
-   enum of robot.yaml `items` plus "none", so it can only name a listed item.
-3. If the API fails (no key, network, timeout, refusal), plain keyword matching.
+The result always has exactly two keys. `action` is "fetch", "stop" or "none";
+`item` is a robot.yaml item when fetching, otherwise None. "none" means the text
+names no listed item. Plan 9.6 shows only fetch and stop; U2's page uses "none",
+and SW1 and SW2 are agreeing it as an amendment to 9.6 on the board.
 
-`action` is "fetch", "stop" or "none" (nothing we can fetch); `item` is None
-unless fetching. `via` says which path answered. The API key comes from the
+1. STOP check first: any word that starts with "stop" (or "stooop"), "halt" or
+   "freez" returns stop, before any import, config read or network call. A false
+   stop costs little; a missed one costs more.
+2. Otherwise ask Claude (claude-opus-5-5, GA Messages API) with structured outputs:
+   `item` is an enum of robot.yaml `items` plus "none", so it can only name a
+   listed item.
+3. If that fails (no key, network, timeout, refusal, unusable answer), plain
+   keyword matching against the item list.
+
+Which path answered is logged at INFO, not returned. The API key comes from the
 environment (ANTHROPIC_API_KEY) and is never logged.
 
     python -m ui.request "my glasses fell"
@@ -28,13 +36,16 @@ log = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = REPO_ROOT / "config" / "robot.yaml"
-DEFAULT_ITEMS = ["phone", "glasses", "pill_bottle", "remote", "pen", "sock"]   # plan 9.1
+# Plan 9.1's list, used only while config/robot.yaml does not exist (task S6).
+DEFAULT_ITEMS = ["phone", "glasses", "pill_bottle", "remote", "pen", "sock"]
 
 MODEL = "claude-opus-5-5"
-TIMEOUT_S = 10.0
-MAX_RETRIES = 1
+MAX_TOKENS = 1024
+TIMEOUT_S = 5.0     # the keyword fallback is cheap, so don't keep a person waiting
+MAX_RETRIES = 0
 
-STOP_WORDS = re.compile(r"\b(stop+|halt|freeze)\b", re.IGNORECASE)
+# Word-start stems, so "stopping", "halted", "freezing" and "stoooop" all count.
+STOP_WORDS = re.compile(r"\b(?:sto+p|halt|freez)", re.IGNORECASE)
 
 # Words people use for each item, for the offline fallback. Items not listed
 # here match on their own name (underscores read as spaces).
@@ -61,14 +72,18 @@ SYSTEM = (
 
 
 def load_items(config_path: Path = CONFIG_PATH) -> list[str]:
-    if config_path.exists():
-        import yaml
+    """The item enum from robot.yaml `items`. Plan 9.1's list only if the file is missing."""
+    if not config_path.exists():
+        log.warning("request parser: %s not found; using plan 9.1's items %s", config_path, DEFAULT_ITEMS)
+        return list(DEFAULT_ITEMS)
+    import yaml
 
-        with open(config_path) as f:
-            items = (yaml.safe_load(f) or {}).get("items")
-        if items:
-            return list(items)
-    return list(DEFAULT_ITEMS)
+    with open(config_path) as f:
+        config = yaml.safe_load(f)
+    items = config.get("items") if isinstance(config, dict) else None
+    if not isinstance(items, list) or not items or not all(isinstance(i, str) and i for i in items):
+        raise ValueError(f"{config_path}: `items` must be a non-empty list of item names")
+    return list(items)
 
 
 def is_stop(text: str) -> bool:
@@ -83,8 +98,8 @@ def keyword_match(text: str, items: list[str]) -> dict:
             if f" {word} " in lowered and (best is None or len(word) > len(best[1])):
                 best = (item, word)           # longest match wins ("tv remote" over "remote")
     if best:
-        return {"action": "fetch", "item": best[0], "via": "keyword"}
-    return {"action": "none", "item": None, "via": "keyword"}
+        return {"action": "fetch", "item": best[0]}
+    return {"action": "none", "item": None}
 
 
 def _schema(items: list[str]) -> dict:
@@ -112,52 +127,77 @@ def _get_client():
 
 
 def ask_claude(text: str, items: list[str], client=None) -> dict:
-    """One structured-output call. Raises on any API problem; parse_request falls back."""
+    """One structured-output call on the GA Messages API (no betas, no fallbacks).
+
+    Raises on any API problem or unusable answer; parse_request then falls back.
+    """
     client = client or _get_client()
-    response = client.beta.messages.create(
+    response = client.messages.create(
         model=MODEL,
-        max_tokens=1024,
-        betas=["server-side-fallback-2026-07-01"],
-        fallbacks="default",
+        max_tokens=MAX_TOKENS,
         system=SYSTEM,
         output_config={"effort": "low", "format": {"type": "json_schema", "schema": _schema(items)}},
         messages=[{"role": "user", "content": f"Known items: {', '.join(items)}\n\nRequest: {text}"}],
     )
-    if response.stop_reason == "refusal":
-        raise RuntimeError("Claude declined the request")
-    answer = json.loads(next(b.text for b in response.content if b.type == "text"))
+    if response.stop_reason != "end_turn":         # refusal, max_tokens (JSON cut short), ...
+        raise RuntimeError(f"Claude stopped with {response.stop_reason!r}")
+    texts = [b.text for b in response.content if b.type == "text"]
+    if len(texts) != 1:
+        raise ValueError(f"expected one text block, got {len(texts)}")
+    answer = json.loads(texts[0])
+    if not isinstance(answer, dict):
+        raise ValueError(f"expected a JSON object, got {type(answer).__name__}")
     action, item = answer["action"], answer["item"]
     if action == "fetch" and item in items:
-        return {"action": "fetch", "item": item, "via": "claude"}
+        return {"action": "fetch", "item": item}
     if action == "stop":
-        return {"action": "stop", "item": None, "via": "claude"}
-    return {"action": "none", "item": None, "via": "claude"}
+        return {"action": "stop", "item": None}
+    return {"action": "none", "item": None}
+
+
+def _try_claude(text: str, items: list[str], client=None) -> dict | None:
+    """ask_claude, or None (with the reason logged) if the keyword fallback should answer."""
+    try:
+        import anthropic
+    except ImportError:
+        log.warning("request parser: anthropic package not installed; using keywords")
+        return None
+    try:
+        return ask_claude(text, items, client)
+    except anthropic.AuthenticationError:
+        log.warning("request parser: API key rejected; using keywords")
+    except anthropic.RateLimitError:
+        log.warning("request parser: rate limited; using keywords")
+    except anthropic.APITimeoutError:
+        log.warning("request parser: API timed out; using keywords")
+    except anthropic.APIConnectionError:
+        log.warning("request parser: no network; using keywords")
+    except anthropic.APIStatusError as e:
+        log.warning("request parser: API error %s; using keywords", e.status_code)
+    except anthropic.AnthropicError as e:
+        log.warning("request parser: %s; using keywords", type(e).__name__)
+    except TypeError as e:
+        if "authentication method" in str(e):      # the SDK's "Could not resolve authentication method"
+            log.warning("request parser: no API credentials (set ANTHROPIC_API_KEY); using keywords")
+        else:                                      # a code or SDK-version bug, not a missing key
+            log.error("request parser: bad SDK call (TypeError: %s); using keywords", e)
+    except (RuntimeError, ValueError, KeyError) as e:
+        log.warning("request parser: unusable answer (%s: %s); using keywords", type(e).__name__, e)
+    return None
 
 
 def parse_request(text: str, items: list[str] | None = None, client=None, use_api: bool = True) -> dict:
+    """Plan 9.6. Returns exactly {"action", "item"}."""
     if is_stop(text):
-        return {"action": "stop", "item": None, "via": "keyword"}
+        log.info("request parser: stop (keyword check)")
+        return {"action": "stop", "item": None}
     items = items or load_items()
-    if use_api:
-        import anthropic
-
-        try:
-            return ask_claude(text, items, client)
-        except anthropic.AuthenticationError:
-            log.warning("request parser: API key invalid; using keywords")
-        except TypeError:       # the SDK's "Could not resolve authentication method"
-            log.warning("request parser: no API key (ANTHROPIC_API_KEY); using keywords")
-        except anthropic.RateLimitError:
-            log.warning("request parser: rate limited; using keywords")
-        except anthropic.APITimeoutError:
-            log.warning("request parser: API timed out; using keywords")
-        except anthropic.APIConnectionError:
-            log.warning("request parser: no network; using keywords")
-        except anthropic.APIStatusError as e:
-            log.warning("request parser: API error %s; using keywords", e.status_code)
-        except (anthropic.AnthropicError, RuntimeError, ValueError, KeyError, StopIteration) as e:
-            log.warning("request parser: %s; using keywords", type(e).__name__)
-    return keyword_match(text, items)
+    result = _try_claude(text, items, client) if use_api else None
+    via = "claude"
+    if result is None:
+        result, via = keyword_match(text, items), "keyword"
+    log.info("request parser: %s %s (via %s)", result["action"], result["item"], via)
+    return result
 
 
 if __name__ == "__main__":
