@@ -48,7 +48,9 @@ class RealArm:
             raise ValueError(f"max_relative_target must be a positive number of degrees, "
                              f"got {max_relative_target!r}")
         SO101Follower, SO101FollowerConfig = _import_follower()
-        kwargs = {"port": port, "id": robot_id, "max_relative_target": max_relative_target}
+        # float, never int: LeRobot's ensure_safe_goal_position accepts only a float or a dict and
+        # raises TypeError on robot.yaml's integer `10` at the first command.
+        kwargs = {"port": port, "id": robot_id, "max_relative_target": float(max_relative_target)}
         fields = {f.name for f in dataclasses.fields(SO101FollowerConfig)}
         if "disable_torque_on_disconnect" in fields:
             kwargs["disable_torque_on_disconnect"] = False
