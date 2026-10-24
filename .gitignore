@@ -1,0 +1,23 @@
+# Photos, datasets, checkpoints and logs: large or machine-specific, never committed
+data/
+outputs/
+*.pt
+*.pth
+*.onnx
+*.npy
+
+# Secrets
+.env
+*.key
+
+# Python and editors
+__pycache__/
+*.pyc
+.venv/
+.ipynb_checkpoints/
+.DS_Store
+.vscode/
+.idea/
+
+# ESP32 firmware build output
+.pio/
