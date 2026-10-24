@@ -746,7 +746,7 @@ def test_claw_reading_open_while_waiting_is_dropped():
     assert where(arm) == "ready" and arm.goal["gripper"] == DEFAULT_POSES["gripper_open"]
 
 
-@pytest.mark.parametrize("slip_s", [0.0, 0.5])
+@pytest.mark.parametrize("slip_s", [0.0, 0.5, 0.9])   # 0.9: starts closing just inside TAKE_SETTLE_S
 def test_slip_at_present_is_dropped_not_taken(slip_s):
     """The person reaches only once the arm has stopped (plan 17): a claw closing within
     TAKE_SETTLE_S of arriving lost the object on its own."""
