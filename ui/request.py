@@ -44,8 +44,9 @@ MAX_TOKENS = 1024
 TIMEOUT_S = 5.0     # the keyword fallback is cheap, so don't keep a person waiting
 MAX_RETRIES = 0
 
-# Word-start stems, so "stopping", "halted", "freezing" and "stoooop" all count.
-STOP_WORDS = re.compile(r"\b(?:sto+p|halt|freez)", re.IGNORECASE)
+# Word-start stems, so "stopping", "halted", "freezing" and "stoooop" all count. Two o's
+# ("stoop") don't: this robot's users can't easily stoop, and will say so.
+STOP_WORDS = re.compile(r"\b(?:stop|sto{3,}p|halt|freez)", re.IGNORECASE)
 
 # Words people use for each item, for the offline fallback. Items not listed
 # here match on their own name (underscores read as spaces).
