@@ -281,6 +281,8 @@ PAGE = """<!doctype html>
     :root { --bg:#151514; --card:#1f1f1d; --ink:#f1f0ec; --muted:#a3a29c; --line:#34332f; }
   }
   * { box-sizing:border-box; }
+  html { -webkit-text-size-adjust:100%; text-size-adjust:100%; }   /* no iOS text inflation in landscape */
+  button, select { touch-action:manipulation; }                   /* fast taps; a double tap on STOP doesn't zoom */
   body { margin:0; background:var(--bg); color:var(--ink);
          font:16px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; padding:16px; }
   main { max-width:640px; margin:0 auto; display:grid; gap:14px; }
@@ -319,7 +321,8 @@ PAGE = """<!doctype html>
   dl { display:grid; grid-template-columns:auto 1fr; gap:6px 14px; margin:0; }
   dt { color:var(--muted); } dd { margin:0; font-variant-numeric:tabular-nums; }
   .row { display:contents; } .row[hidden] { display:none; }
-  #thumbs { display:flex; gap:8px; flex-wrap:wrap; } #thumbs img { width:150px; border-radius:8px; }
+  #thumbs { display:flex; gap:8px; flex-wrap:wrap; } #thumbs img { width:150px; max-width:100%; border-radius:8px; }
+  @media (max-width:480px) { #thumbs img { width:calc(50% - 4px); } }   /* phones: two per row, full width */
   #reply { color:var(--muted); min-height:1.4em; }
   .stale #state::after { content:" (no connection)"; font-size:16px; color:var(--stop); }
 </style></head>
