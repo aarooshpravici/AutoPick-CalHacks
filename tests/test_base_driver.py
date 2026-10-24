@@ -3,12 +3,12 @@ import threading
 import time
 import unittest
 
-from base.driver import BaseDriver, FakeSerial
+from base.driver import BaseDriver, FakeSerial, MotionStopped, NoLiftError
 
 
 class DriverTests(unittest.TestCase):
     def setUp(self):
-        self.port = FakeSerial()
+        self.port = FakeSerial(has_lift=True)
         self.driver = BaseDriver(self.port, max_speed_mm_s=200, max_lift_mm=1000, timeout=0.25)
         self.addCleanup(self.driver.close)
         self.driver.status(timeout=1)
@@ -50,7 +50,8 @@ class DriverTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.driver.drive(10, 10)
         self.driver.stop()
-        self.assertEqual(self.port.lift_mm, 700)  # STOP is wheels-only in frozen protocol.
+        self.assertEqual(self.port.lift_mm, 700)  # STOP holds the current height.
+        self.assertTrue(self.port.lift_enabled)
 
     def test_stale_status_and_estop(self):
         with self.driver._condition:
@@ -105,7 +106,7 @@ class DriverTests(unittest.TestCase):
         def home():
             try:
                 self.driver.lift_home()
-            except TimeoutError as error:
+            except MotionStopped as error:
                 failures.append(error)
 
         thread = threading.Thread(target=home)
@@ -117,8 +118,58 @@ class DriverTests(unittest.TestCase):
         thread.join(1)
         self.assertFalse(thread.is_alive())
         self.assertEqual(len(failures), 1)
-        with self.assertRaises(RuntimeError):
-            self.driver.ping()  # Do not mistake a late response for a later command.
+        self.driver.ping()  # STOP acknowledgment drained; the link remains usable.
+
+    def test_wheels_only_capability_errors_do_not_fault_link(self):
+        with BaseDriver(FakeSerial(), max_speed_mm_s=200, max_lift_mm=1000) as driver:
+            driver.status(timeout=1)
+            for call in (driver.lift_home, lambda: driver.lift_to(700), driver.tray_grams, driver.tare):
+                with self.assertRaisesRegex(NoLiftError, "no lift"):
+                    call()
+                driver.ping()
+            driver.drive(50, 50)
+            self.assertEqual((driver.status().lift_mm, driver.status().tray_g), (0, 0))
+
+    def test_fake_stop_abandons_moving_lift_and_holds(self):
+        now = [0.0]
+        port = FakeSerial(has_lift=True, lift_speed_mm_s=100, clock=lambda: now[0])
+        port.write(b"LIFT_HOME\n")
+        port.write(b"LIFT_TO 700\n")
+        now[0] = 2
+        port.write(b"STOP\n")
+        self.assertEqual(port.lift_mm, 200)
+        self.assertIsNone(port.lift_target)
+        self.assertTrue(port.lift_enabled)
+        now[0] = 20
+        port.readline()
+        self.assertEqual(port.lift_mm, 200)
+        self.assertFalse(any(b"LIFT_AT" in line for line in port._lines))
+        port.write(b"LIFT_HOME\n")
+        now[0] = 22
+        port.readline()
+        self.assertEqual(port.lift_mm, 0)
+
+    def test_stop_cancels_real_pending_fake_lift(self):
+        self.driver.lift_home()
+        self.port.lift_speed = 100
+        errors = []
+        def lift():
+            try:
+                self.driver.lift_to(700)
+            except MotionStopped as error:
+                errors.append(error)
+        worker = threading.Thread(target=lift)
+        worker.start()
+        deadline = time.monotonic() + 1
+        while self.port.lift_target is None and time.monotonic() < deadline:
+            time.sleep(.001)
+        self.assertIsNotNone(self.port.lift_target)
+        self.driver.stop()
+        worker.join(1)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(len(errors), 1)
+        self.assertTrue(self.port.lift_enabled)
+        self.driver.ping()
 
     def test_close_stops_wheels_and_closes_thread(self):
         self.driver.drive(10, 10)
