@@ -360,7 +360,9 @@ perception:
   hand_udp: 127.0.0.1:5602
   parking_spot_floor_m: [0.22, 0.0]        # measured in task P4
   parking_tolerance_m: 0.02
-handoff: {timeout_s: 60}                   # seconds holding at the present pose before giving up
+handoff:
+  timeout_s: 60                            # seconds holding at the present pose before giving up
+  grip: squeeze                            # squeeze (firm) or light; decided by the A5 pull test (D9)
 lift:                                      # stretch: tray lift
   seated_hand_mm: 700
   standing_hand_mm: 1000
@@ -393,7 +395,7 @@ The main call is a hand-off: the arm picks the object, lifts it to the `present`
 
 ```python
 result = pick_to_hand(arm, poses, pan_deg=0.0, roll_deg=0.0, policy=None, speed_deg_s=45,
-                      handoff_timeout_s=60, stop_event=None, on_state=None)
+                      handoff_timeout_s=60, handoff_grip="squeeze", stop_event=None, on_state=None)
 # on_state, if given, is called with "pick", "present" and "wait_for_take" as the arm
 # reaches each stage, so the brain can show Pick / Present / WaitForTake (10.7).
 # result == {"result": "taken" | "timeout" | "missed" | "dropped" | "stuck" | "stopped",
