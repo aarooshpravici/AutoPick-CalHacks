@@ -123,3 +123,16 @@ def test_teach_cli_real_mode_uses_the_live_table(monkeypatch, tmp_path):
                    "  follower_id: f\n  leader_id: l\n  max_relative_target_deg: 10\n  move_speed_deg_s: 45\n")
     assert teach_mod.main(["--config", str(cfg), "--out", str(tmp_path / "p.json")]) == 1
     assert used == ["live"]
+
+
+def test_stdin_that_cant_be_watched_fails_safe(monkeypatch):
+    class Pseudo:
+        def fileno(self):
+            import io
+            raise io.UnsupportedOperation("redirected stdin is pseudofile, has no fileno()")
+
+    monkeypatch.setattr(align.sys, "stdin", Pseudo())
+    follower = Still(READY)
+    with pytest.raises(align.AlignError, match="Nothing moved"):
+        align.live_align(Still(READY), follower, out=io.StringIO())
+    assert follower.commands == []

@@ -51,8 +51,12 @@ def table(leader: dict, follower: dict) -> list[str]:
 
 
 def _enter_from_stdin(timeout_s: float) -> bool:
-    """True if a line arrived on stdin within timeout_s. Raises AlignError on end of input."""
-    ready, _, _ = select.select([sys.stdin], [], [], timeout_s)
+    """True if a line arrived on stdin within timeout_s. Raises AlignError on end of input, or
+    if stdin can't be watched (not a terminal or pipe): nothing has moved at that point."""
+    try:
+        ready, _, _ = select.select([sys.stdin], [], [], timeout_s)
+    except (AttributeError, OSError, ValueError) as e:      # io.UnsupportedOperation is an OSError
+        raise AlignError(f"can't read Enter from this input ({e}); run it in a terminal. Nothing moved")
     if not ready:
         return False
     if sys.stdin.readline() == "":
