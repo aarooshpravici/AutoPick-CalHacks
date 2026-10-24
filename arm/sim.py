@@ -53,6 +53,8 @@ class SimArm:
     def __init__(self, poses: dict | None = None, miss_first: int = 0, slip_on_lift: bool = False,
                  stall_joint: str | None = None, joint_speed_deg_s: float = 180.0,
                  grip_speed_s: float = 150.0, object_width: float = 15.0):
+        if stall_joint is not None and stall_joint not in ARM_JOINTS:
+            raise ValueError(f"stall_joint must be one of {ARM_JOINTS}, got {stall_joint!r}")
         self.poses = poses_mod.validate(poses or DEFAULT_POSES)
         self.pos = {j: float(self.poses["ready"][j]) for j in JOINTS}
         self.goal = dict(self.pos)

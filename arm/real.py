@@ -7,6 +7,8 @@ match the arm. Leaves the torque on when closed, so the arm holds its pose.
 from __future__ import annotations
 
 import dataclasses
+import math
+import numbers
 
 from .poses import JOINTS
 
@@ -20,7 +22,13 @@ def _import_follower():
 
 
 class RealArm:
-    def __init__(self, port: str, robot_id: str, max_relative_target: float = 10):
+    def __init__(self, port: str, robot_id: str, max_relative_target: float):
+        """max_relative_target: LeRobot's per-command step cap in degrees, from robot.yaml
+        arm.max_relative_target_deg. Required: None would mean no cap at all."""
+        if (not isinstance(max_relative_target, numbers.Real) or isinstance(max_relative_target, bool)
+                or not math.isfinite(max_relative_target) or max_relative_target <= 0):
+            raise ValueError(f"max_relative_target must be a positive number of degrees, "
+                             f"got {max_relative_target!r}")
         SO101Follower, SO101FollowerConfig = _import_follower()
         kwargs = {"port": port, "id": robot_id, "max_relative_target": max_relative_target}
         fields = {f.name for f in dataclasses.fields(SO101FollowerConfig)}
