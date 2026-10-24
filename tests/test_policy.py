@@ -561,3 +561,61 @@ def test_cli_real_policy_mode_closes_cameras(fakes, tmp_path, capsys, monkeypatc
     else:
         assert (rc, result["result"]) == (0, "taken")      # hand mode is the default (A7)
     assert len(opened()) == 2 and sorted(closed()) == [("close", 1), ("close", 2)]
+
+
+class _Loaded(Exception):
+    pass
+
+
+@pytest.mark.parametrize("entry", [pick.pick_to_hand, pick.pick_to_tray])
+@pytest.mark.parametrize("size", [None, (640, 360)])
+def test_pick_passes_camera_size_to_load_policy(monkeypatch, tmp_path, entry, size):
+    """A wrist webcam that can only record 640x360 must still run a 320x180 checkpoint."""
+    seen = {}
+
+    def fake_load(path, **kw):
+        seen.update(kw)
+        raise _Loaded
+
+    monkeypatch.setattr(pick, "load_policy", fake_load)
+    poses = dict(DEFAULT_POSES)
+    with pytest.raises(_Loaded):
+        entry(SimArm(), poses, policy=tmp_path, camera_size=size)
+    assert seen.get("capture_size") == size
+
+
+@pytest.mark.parametrize("entry", [pick.pick_to_hand, pick.pick_to_tray])
+def test_camera_size_without_a_checkpoint_is_an_error(entry):
+    with pytest.raises(ValueError, match="camera_size"):
+        entry(SimArm(), dict(DEFAULT_POSES), policy=None, camera_size=(640, 360))
+
+
+@pytest.mark.parametrize("entry", [pick.pick_to_hand, pick.pick_to_tray])
+@pytest.mark.parametrize("size", [(0, 0), (640, 0), (-640, 360), (640,), (640, 360, 3), "64", 640, (640.0, 360.0),
+                                  (True, 360), (640, None)])
+def test_a_bad_camera_size_is_a_clear_error_before_anything_happens(monkeypatch, tmp_path, entry, size):
+    monkeypatch.setattr(pick, "load_policy", lambda *a, **kw: pytest.fail("opened the checkpoint"))
+    arm = SimArm()
+    sent = []
+    arm.command = lambda targets: sent.append(targets)
+    with pytest.raises(ValueError, match="camera_size must be"):
+        entry(arm, dict(DEFAULT_POSES), policy=tmp_path, speed_deg_s=1000, camera_size=size)   # checked first
+    assert sent == []
+
+
+@pytest.mark.parametrize("size", [(640, 360), [640, 360], (np.int64(640), np.int64(360))])
+def test_camera_size_may_be_any_pair_of_positive_ints(monkeypatch, tmp_path, size):
+    seen = {}
+
+    def fake_load(path, **kw):
+        seen.update(kw)
+        raise _Loaded
+
+    monkeypatch.setattr(pick, "load_policy", fake_load)
+    with pytest.raises(_Loaded):
+        pick.pick_to_tray(SimArm(), dict(DEFAULT_POSES), policy=tmp_path, camera_size=size)
+    assert seen["capture_size"] == (640, 360) and type(seen["capture_size"][0]) is int
+
+
+def test_pick_to_tray_documents_camera_size():
+    assert "camera_size" in pick.pick_to_tray.__doc__ and "camera_size" in pick.pick_to_hand.__doc__

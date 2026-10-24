@@ -26,7 +26,8 @@ re-records it, ESC stops). The scripted lift does the rest, so don't record it.
 Cameras: LeRobot's OpenCV camera does not resize. If a webcam can't deliver
 exactly 320x180 at the chosen fps it fails at connect. Check this on the real wrist
 webcam in the T1 rehearsal; if it fails, record at a native size (for example
---width 640 --height 360) and resize to 320x180 in the convert step.
+--width 640 --height 360) and resize to 320x180 in the convert step:
+python -m training.convert --src data/datasets/NAME --dst data/datasets/NAME_320.
 """
 
 from __future__ import annotations
@@ -43,6 +44,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = REPO_ROOT / "config" / "robot.yaml"
 DATASETS = REPO_ROOT / "data" / "datasets"
 TASK = "Pick up the object from the floor"
+WIDTH, HEIGHT = 320, 180    # what ACT trains on (plan 10.2)
+FPS = 30                    # must equal arm/pick.py RATE_HZ, the rate the policy runs at
 EXE_NAME = "lerobot-record"
 
 INSTRUCTIONS = """\
@@ -175,9 +178,9 @@ def main(argv=None) -> int:
     p.add_argument("--name", required=True, help="dataset name, e.g. rehearsal or grasp_v1")
     p.add_argument("--episodes", type=_count(1), default=50)
     p.add_argument("--scene", action="store_true", help="also record the deck webcam as `scene` (decision D4)")
-    p.add_argument("--width", type=_count(1), default=320)
-    p.add_argument("--height", type=_count(1), default=180)
-    p.add_argument("--fps", type=_count(1), default=30)
+    p.add_argument("--width", type=_count(1), default=WIDTH)
+    p.add_argument("--height", type=_count(1), default=HEIGHT)
+    p.add_argument("--fps", type=_count(1), default=FPS)
     p.add_argument("--episode-time", type=_count(1), default=20, help="max seconds per demo")
     p.add_argument("--reset-time", type=_count(0), default=10, help="seconds to move the object between demos")
     p.add_argument("--speed", type=float, default=None,

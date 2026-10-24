@@ -209,6 +209,28 @@ def test_run_over_ssh_keeps_arguments_intact(env, dataset):
     assert set((tmp / "ssh.log").read_text().split()) == {"trainpc"}
 
 
+def test_lerobot_train_accepts_the_flags(env, dataset):
+    """remote.sh's lerobot-train flags, read by lerobot-train's own config parser (LeRobot 0.6.2),
+    alone and with the Mac changes training/rehearse_sim.py adds."""
+    pytest.importorskip("lerobot.scripts.lerobot_train")
+    import draccus
+    from lerobot.scripts.lerobot_train import TrainPipelineConfig
+    from training import rehearse_sim
+
+    e, home, tmp = env
+    sh(e, "run", str(dataset), "flags", "--steps", "200")
+    args = trainer_args(home / "floor-picker-train", "flags")
+    cfg = draccus.parse(TrainPipelineConfig, args=args)
+    assert (cfg.policy.type, cfg.policy.push_to_hub, cfg.wandb.enable) == ("act", False, False)
+    assert (cfg.steps, cfg.save_freq, cfg.dataset.repo_id) == (200, 200, "local/flags")
+    tfs = cfg.dataset.image_transforms
+    assert tfs.enable and tfs.max_num_transforms == 2 and sorted(tfs.tfs) == ["brightness", "contrast"]
+    assert tfs.tfs["brightness"].type == "ColorJitter" and tfs.tfs["contrast"].kwargs == {"contrast": [0.8, 1.2]}
+    mac = draccus.parse(TrainPipelineConfig, args=args + rehearse_sim.mac_overrides(200))
+    assert mac.policy.pretrained_backbone_weights is None
+    assert (mac.batch_size, mac.num_workers) == (2, 0)
+
+
 def test_setup_over_ssh_quotes_arguments(env):
     e, home, tmp = env
     index = "https://wheels.example.invalid/cu 128/it's {x}"

@@ -395,7 +395,10 @@ The main call is a hand-off: the arm picks the object, lifts it to the `present`
 
 ```python
 result = pick_to_hand(arm, poses, pan_deg=0.0, roll_deg=0.0, policy=None, speed_deg_s=45,
-                      handoff_timeout_s=60, handoff_grip="squeeze", stop_event=None, on_state=None)
+                      handoff_timeout_s=60, handoff_grip="squeeze", stop_event=None, on_state=None,
+                      camera_size=None)
+# camera_size (width, height): open the policy's webcams at this size when they can't
+# deliver the checkpoint's image size themselves (same aspect ratio; resized like at recording).
 # on_state, if given, is called with "pick", "present" and "wait_for_take" as the arm
 # reaches each stage, so the brain can show Pick / Present / WaitForTake (10.7).
 # result == {"result": "taken" | "timeout" | "missed" | "dropped" | "stuck" | "stopped",
