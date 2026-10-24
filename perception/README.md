@@ -112,6 +112,18 @@ terminal A from the repository root and types their password:
 sudo .venv/perception/bin/python -m perception.publish --device mps
 ```
 
+To see the colour camera while detecting, stop the running publisher with
+Ctrl-C, then restart it with `--preview`:
+
+```sh
+sudo .venv/perception/bin/python -m perception.publish --device mps --preview
+```
+
+The window shows the same boxes sent over UDP, with class, confidence and pixel
+height. Click the window and press Q or Esc to quit (Ctrl-C in the terminal also
+works). It uses the publisher's existing camera stream, so do not start a second
+camera program. Preview also works with `--fake` without hardware or sudo.
+
 In terminal B, place the phone and run a five-second labelled measurement:
 
 ```sh

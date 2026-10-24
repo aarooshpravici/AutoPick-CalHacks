@@ -99,8 +99,26 @@ def address(value):
     return host, port
 
 
+def annotated_frame(colour, message, *, simulated=False):
+    """Draw the exact published detections without modifying the camera frame."""
+    import cv2
+    view = colour.copy()
+    for item in message["items"]:
+        x1, y1, x2, y2 = [round(value) for value in item["bbox_px"]]
+        cv2.rectangle(view, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        label = f"{item['label']} {item['conf']:.0%} | {y2 - y1}px tall"
+        cv2.putText(view, label, (x1, max(20, y1 - 8)),
+                    cv2.FONT_HERSHEY_SIMPLEX, .65, (0, 255, 0), 2)
+    caption = f"{'SIMULATED' if simulated else 'LIVE'} | {len(message['items'])} detections | Q or Esc to quit"
+    cv2.putText(view, caption, (12, 28), cv2.FONT_HERSHEY_SIMPLEX,
+                .65, (0, 0, 0), 4)
+    cv2.putText(view, caption, (12, 28), cv2.FONT_HERSHEY_SIMPLEX,
+                .65, (255, 255, 255), 1)
+    return view
+
+
 def publish(camera, detector, sock, destination, *, conf=.5, homography=None,
-            hz=15, count=None):
+            hz=15, count=None, preview=False, simulated=False):
     sent = 0
     while count is None or sent < count:
         start = time.monotonic()
@@ -108,6 +126,11 @@ def publish(camera, detector, sock, destination, *, conf=.5, homography=None,
         message = make_message(frame, detector(frame.colour), conf=conf, homography=homography)
         sock.sendto(json.dumps(message, allow_nan=False).encode(), destination)
         sent += 1
+        if preview:
+            import cv2
+            cv2.imshow("Floor Picker detections", annotated_frame(frame.colour, message, simulated=simulated))
+            if cv2.waitKey(1) & 0xFF in (ord("q"), ord("Q"), 27):
+                break
         time.sleep(max(0, 1 / hz - (time.monotonic() - start)))
     return sent
 
@@ -120,6 +143,7 @@ def main(argv=None):
     parser.add_argument("--count", type=int, help="exit after N messages")
     parser.add_argument("--hz", type=float, default=15)
     parser.add_argument("--device", help="YOLO device, e.g. mps or cpu")
+    parser.add_argument("--preview", action="store_true", help="show colour video with detection boxes; Q/Esc quits")
     args = parser.parse_args(argv)
     if not math.isfinite(args.hz) or args.hz <= 0 or (args.count is not None and args.count <= 0):
         parser.error("hz and count must be positive")
@@ -139,9 +163,14 @@ def main(argv=None):
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
             with (FakeCamera if args.fake else RealSense)(settings) as camera:
                 publish(camera, detector, sock, destination, conf=conf,
-                        homography=homography, hz=args.hz, count=args.count)
+                        homography=homography, hz=args.hz, count=args.count,
+                        preview=args.preview, simulated=args.fake)
     except KeyboardInterrupt:
         pass
+    finally:
+        if args.preview:
+            import cv2
+            cv2.destroyAllWindows()
     return 0
 
 
