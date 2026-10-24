@@ -5,6 +5,8 @@ outputs/
 *.pth
 *.onnx
 *.npy
+*.safetensors
+*.log
 
 # Secrets
 .env
