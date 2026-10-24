@@ -1080,13 +1080,18 @@ class ClawStopsShort(SimArm):
 
 
 @pytest.mark.parametrize("grip", pick.HANDOFF_GRIPS)
-def test_closing_take_close_units_from_the_hold_is_a_take_in_both_grips(grip):
-    arm = ClawStopsShort(pick.TAKE_CLOSE_UNITS)
+def test_closing_take_close_units_from_the_hold_is_a_take_only_in_light_grip(grip):
+    """Light: closing TAKE_CLOSE_UNITS from the hold is a take. Squeeze keeps main's rule (the
+    closed side only), so a soft case creeping a few units under the full squeeze isn't."""
+    arm = ClawStopsShort(pick.TAKE_CLOSE_UNITS, never_take=False)
     short_of_closed_side = DEFAULT_POSES["gripper_closed"] + pick.GRIP_MARGIN
     assert arm._object_stop - pick.TAKE_CLOSE_UNITS >= short_of_closed_side
-    r = hand(arm, handoff_grip=grip)
-    assert r["result"] == "taken", r["detail"]
-    assert arm.object == "hand" and where(arm) == "ready"
+    r = hand(arm, handoff_grip=grip, handoff_timeout_s=5)
+    if grip == "light":
+        assert r["result"] == "taken", r["detail"]
+        assert arm.object == "hand" and where(arm) == "ready"
+    else:
+        assert r["result"] == "timeout", r["detail"]
 
 
 @pytest.mark.parametrize("width, light_squeeze", [(15.0, pick.LIGHT_SQUEEZE), (5.0, pick.LIGHT_SQUEEZE),

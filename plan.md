@@ -519,7 +519,7 @@ flowchart TD
 - **Grip while presenting (D9):** a switch, `handoff.grip` in `robot.yaml`: `squeeze` or `light` (`--handoff-grip` overrides it for one run). The default stays `squeeze` until the A5 pull test decides.
   - `squeeze`: the claw keeps the carry squeeze while waiting at `present`.
   - `light`: on arriving at `present`, holding, the arm records where the claw stopped on the object (`hold_pos`). While waiting it commands the claw only `LIGHT_SQUEEZE` (6) units past `hold_pos`, never past the full squeeze, so it presses less hard. Every carry move, including the move back to `lift` after a timeout, still squeezes fully.
-  - **Taken, in both modes:** a claw read counts as closed when it is on the closed side, or at least `TAKE_CLOSE_UNITS` (4) units closed from `hold_pos`. In `light` mode the claw closes only about 6 units once the phone is pulled out, short of the closed side, so the second rule is what sees the take. 6 closed reads in a row are a take. Closing that starts within 1 s of arriving is still a slip ("dropped").
+  - **Taken:** in `squeeze` mode a claw read counts as closed only on the closed side. In `light` mode it also counts at least `TAKE_CLOSE_UNITS` (4) units closed from `hold_pos` (the median of 5 reads on arrival). In `light` mode the claw closes only about 6 units once the phone is pulled out, short of the closed side, so the second rule is what sees the take. 6 closed reads in a row are a take. Closing that starts within 1 s of arriving is still a slip ("dropped").
 
 **Arrival checks**
 

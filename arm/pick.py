@@ -59,6 +59,7 @@ import argparse
 import functools
 import json
 import math
+import statistics
 import numbers
 import signal
 import sys
@@ -277,9 +278,13 @@ class _Picker:
         target = hold_pos - self.dir * LIGHT_SQUEEZE
         return target if (target - self.g_squeeze) * self.dir >= 0 else self.g_squeeze
 
-    def _reads_closed(self, gripper: float, hold_pos: float) -> bool:
-        """On the closed side, or at least TAKE_CLOSE_UNITS closed from hold_pos."""
-        return self._closed_side(gripper) or (hold_pos - gripper) * self.dir >= TAKE_CLOSE_UNITS
+    def _reads_closed(self, gripper: float, hold_pos: float | None) -> bool:
+        """On the closed side, or (light grip only: pass hold_pos) at least TAKE_CLOSE_UNITS
+        closed from hold_pos. Squeeze passes None: a soft case can creep a few units under the
+        full squeeze, and that must not read as a take."""
+        if self._closed_side(gripper):
+            return True
+        return hold_pos is not None and (hold_pos - gripper) * self.dir >= TAKE_CLOSE_UNITS
 
     def wait_for_take(self, timeout_s: float, hold_pos: float, grip: str = "squeeze") -> str:
         """Hold still at the present pose and read the claw at TAKE_POLL_HZ. hold_pos is where
@@ -304,7 +309,7 @@ class _Picker:
             # (max_relative_target), so one command alone would stop the claw short of closed.
             self._send(self.joint_cmd, target)
             g = self.arm.read()["gripper"]
-            is_closed = self._reads_closed(g, hold_pos)
+            is_closed = self._reads_closed(g, hold_pos if grip == "light" else None)
             if is_closed:
                 closed_since = now if closed == 0 else closed_since
                 closed += 1
@@ -374,7 +379,9 @@ class _Picker:
         near_person = min(self.speed, PRESENT_SPEED_DEG_S)
         on_state("present")
         self.carry("present", speed=near_person)
-        hold_pos = self.arm.read()["gripper"]        # holding: carry() just checked
+        # Holding (carry() just checked). Median of a few reads, so one noisy read can't
+        # shift the light grip's target or its take threshold.
+        hold_pos = statistics.median(self.arm.read()["gripper"] for _ in range(5))
         on_state("wait_for_take")
         outcome = self.wait_for_take(timeout_s, hold_pos, grip)
         if outcome == "dropped":
