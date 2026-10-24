@@ -124,6 +124,13 @@ height. Click the window and press Q or Esc to quit (Ctrl-C in the terminal also
 works). It uses the publisher's existing camera stream, so do not start a second
 camera program. Preview also works with `--fake` without hardware or sudo.
 
+If startup reports `UVC device is already opened`, close other camera apps and
+capture scripts, then unplug/replug the D435 on its own USB 3 port and retry
+one publisher. The reader now cleans up failed startup attempts and creates a
+fresh pipeline for each retry. Each original startup error is printed, so if
+it still fails, include the first error as well as the final traceback.
+`floor mapping=False` is expected before P4 and does not prevent video.
+
 In terminal B, place the phone and run a five-second labelled measurement:
 
 ```sh
