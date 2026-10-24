@@ -302,6 +302,19 @@ def test_cli_refuses_speed_above_config(tmp_path, capsys, monkeypatch, fake_real
     assert NoHardware.opened == []    # and the arm was never opened
 
 
+@pytest.mark.parametrize("flag", ["--pan", "--roll"])
+@pytest.mark.parametrize("value", ["nan", "inf", "-inf"])
+def test_cli_refuses_non_finite_offset_before_opening_the_arm(tmp_path, capsys, monkeypatch,
+                                                               fake_real_arm, flag, value):
+    seen = capture_speed(monkeypatch)
+    rc, r, _ = run_cli(tmp_path, capsys, flag, value, "--poses", str(fake_real_arm),
+                       config=write_config(tmp_path))
+    assert (rc, r["result"]) == (1, "error")
+    assert flag in r["detail"]
+    assert seen == []                 # the pick never started
+    assert NoHardware.opened == []    # and the arm was never opened (torque stays off)
+
+
 def test_cli_real_mode_reads_arm_settings_from_config(tmp_path, capsys, fake_real_arm):
     rc, r, _ = run_cli(tmp_path, capsys, "--poses", str(fake_real_arm),
                        config=write_config(tmp_path, max_relative_target_deg=7))
