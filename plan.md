@@ -134,7 +134,7 @@ flowchart TB
         TOP["Mast-top webcam (stretch)<br/>finds the hand"]
         ARM["SO-101 follower arm<br/>bus servo board, 12 V"]
         ESP["ESP32<br/>wheels (stretch: lift, load cell)"]
-        DRV["2 drive steppers<br/>TMC2209 drivers"]
+        DRV["4 drive motors, all wheels<br/>left pair + right pair<br/>type: confirm with Darren"]
         LIFT["Lift stepper (stretch)<br/>GT2 belt on the mast"]
         LOAD["Load cell + HX711 (stretch)<br/>under the tray"]
         LIM["Bottom limit switch (stretch)"]
@@ -168,21 +168,21 @@ flowchart TB
 ```mermaid
 block-beta
   columns 5
-  WL["Drive wheel L"] CAM["Front camera post"] ARM["SO-101 arm"] space WR["Drive wheel R"]
+  WL["Drive wheel L, front"] CAM["Front camera, low"] ARM["SO-101 arm"] space WR["Drive wheel R, front"]
   space ESP["ESP32 + drivers"] MAC["MacBook shelf"]:2 space
   space HUB["USB hub + fuses"] TRAY["Tray, low position (stretch)"] PWR["12 V in + E-stop"] space
-  CL["Fixed wheel L (casters advised)"] space MAST["Mast + lift stepper (stretch)"] space CR["Fixed wheel R (casters advised)"]
+  CL["Drive wheel L, rear"] space MAST["Mast + lift stepper (stretch)"] space CR["Drive wheel R, rear"]
 ```
 
 | Item | Size or position | Why |
 |---|---|---|
 | Deck | **Built: about 60 × 38 cm** (23.7 × 15 in, length × width), top about **7 cm** (2.75 in) off the floor once the wheels are on. The plan asked for at least 40 × 30 cm and 8–12 cm. | Fits the MacBook on board, with room for the stretch mast. Narrower than 28 cm wobbles. The arm's mount height is fixed by the A5 reach test and must not change after 09:00 Sat. |
-| Drive wheels | **Built: four wheels, one at each corner; two are driven** by NEMA 17 steppers (front or back pair: confirm) | Differential steering: the robot turns by running the two driven wheels at different speeds. Arm weight should sit over the driven pair so they keep their grip. |
-| Non-driven wheels | **Built: two fixed wheels.** The plan asked for swivel or ball casters, set 1–2 mm higher than the drive wheels. | Fixed wheels can't swivel, so they scrape sideways whenever the robot turns. Turning in place is jerky and less accurate, and the steppers can stall. Swap them for casters if at all possible (D10). |
+| Drive wheels | **Built: four wheels, one at each corner, all motorised.** Skid steering, like a tank: both left wheels get one speed and both right wheels another (left pair + right pair assumed; motor type and wiring to confirm with Darren, D10). | No unpowered wheels to drag, and all four keep their grip. |
+| Skid steering | Every turn scrubs the tyres sideways. The deck is longer (60 cm) than it is wide (38 cm), so with corner wheels the wheelbase is longer than the track, which makes turning in place hard on grippy floors; the motors can stall. | Test turning in place as soon as the wheels run (D10). If it struggles, move the wheels closer together lengthwise, or use smoother or narrower tyres. |
 | Arm | Front, centred, between or just behind the drive wheels | Its reach to the floor hangs out past the front as little as possible. |
 | Mast and tray (stretch) | Back, centred; tray on the arm's side of the mast | Only if the tray lift is built: the arm can drop into the tray at its lowest position. |
-| Heavy parts | MacBook (and a battery, if used) low, between the driven axle and the other wheels | The MacBook stays on board and is the arm's counterweight, balancing the arm reaching forward. |
-| Turning | The robot pivots around the middle of the driven axle. If that axle is at the front, the back of the 60 cm deck sweeps a circle about 1.15 m across (estimate). With fixed wheels the pivot point also drifts. | Turn slowly near people and furniture, and leave room near the chair. |
+| Heavy parts | MacBook (and a battery, if used) low and central, between the wheels | The MacBook stays on board and is the arm's counterweight, balancing the arm reaching forward. |
+| Turning | The robot turns around the centre of its four wheels, so the 60 × 38 cm deck sweeps a circle about 71 cm across when turning in place (estimate). Wheel slip makes turns imprecise; the camera closes the loop while parking. | Turn slowly near people and furniture. |
 
 ### 6.2 Heights (side view, not to scale)
 
@@ -236,7 +236,7 @@ This is a stretch goal. It is built only after G4, and only if everything else w
 flowchart LR
     SUP["12 V 10 A supply<br/>tethered for the demo"] --> ES["E-stop switch"] --> MF["Main fuse 15 A"] --> DB["Distribution block"]
     DB --> F1["Fuse 5 A"] --> ARMB["SO-101 follower<br/>bus servo board"]
-    DB --> F2["Fuse 5 A"] --> CAP["470-1000 uF capacitor"] --> TMC["2 x TMC2209<br/>2 wheels<br/>(a third for the stretch lift)"]
+    DB --> F2["Fuse 5 A"] --> CAP["470-1000 uF capacitor"] --> TMC["4 wheel motor drivers<br/>type: confirm with Darren<br/>a lift driver is stretch"]
     DB --> F3["Fuse 2 A"] --> PUMP["Pump + valve<br/>only if suction"]
     DB --> F4["Fuse 1 A"] --> BUCK["Buck converter 12 V to 5 V"] --> ESPP["ESP32, LED<br/>HX711 (stretch)"]
     LEAD["SO-101 leader: own 5 V supply,<br/>stays off the robot"]
@@ -247,7 +247,7 @@ flowchart LR
 | Load | Peak current at 12 V |
 |---|---|
 | SO-101 follower | About 3 A |
-| 2 drive steppers | About 0.5–1 A each |
+| 4 drive motors | About 0.5–1 A each if NEMA 17 steppers (estimate; confirm with Darren) |
 | Lift stepper (moving, stretch) | About 1 A |
 | Pump and valve (only if suction) | About 0.5 A |
 | ESP32 and sensors, via the buck converter | Small |
@@ -353,7 +353,7 @@ base:
   serial_port: /dev/tty.usbserial-XXXX
   baud: 115200
   wheel_diameter_mm: 72
-  track_width_mm: 260                      # measure on the built base (wheel centre to centre; the deck is 38 cm wide)
+  track_width_mm: 260                      # skid steering: start from the wheel centre-to-centre distance, then tune it until a commanded 90° turn really is 90°
   max_speed_mm_s: 200
 perception:
   detections_udp: 127.0.0.1:5601
@@ -619,7 +619,7 @@ flowchart TD
 
 **Firmware (`base/firmware/`)**
 
-- **Platform:** ESP32 with the FastAccelStepper library and two TMC2209 drivers for the wheels. The stretch lift adds a third driver, an HX711 and the bottom limit switch.
+- **Platform:** ESP32 with drivers for four wheel motors, as left and right pairs: the two motors on a side get the same command, so `DRIVE <left> <right>` is unchanged. If they are steppers, use four TMC2209s, with the two drivers on each side sharing the step and direction pins. If they are DC motors, use H-bridge drivers instead, and STAT reports encoder counts (or 0 without encoders). Motor type: confirm with Darren (D10). The stretch lift adds its own driver, an HX711 and the bottom limit switch.
 - **Protocol:** implements 9.5 exactly.
 - **Watchdog:** the 300 ms wheel watchdog is mandatory.
 - **Acceleration:** limit wheel acceleration, and lift acceleration if the lift is built, so the robot doesn't rock.
@@ -727,7 +727,7 @@ IDs are referenced on the board. **Depends on** must be done first. Gate tasks (
 | P3 | Train YOLO v1; `perception/publish.py` sends 9.2 | SW2 | P2 | 9/10 live detections |
 | P4 | Floor homography + parking spot measured | SW2 | P3, A3 | `floor_m` within 2 cm at 3 test points |
 | P5 | Venue floor top-up (about 50 photos), retrain | SW2 | P3 | Detection holds on the venue floor |
-| B1 | Deck and four wheels built (two driven; casters advised for the other two, D10) | HW1 | — | Pushes and turns freely by hand |
+| B1 | Deck and four driven wheels built (skid steering) | HW1 | — | Pushes by hand; turns in place on serial without stalling (D10) |
 | B2 | Power distribution, E-stop, fuses, buck converter, capacitor | HW1 | B1 | E-stop cuts all 12 V loads |
 | B3 | ESP32 firmware: drive, watchdog, protocol | SW2 | B2 (bench is fine) | 10.5 bench checks pass |
 | B4 | `base/driver.py` + fake serial + tests | SW2 | S6 | Tests pass without the ESP32 |
@@ -787,11 +787,11 @@ IDs are referenced on the board. **Depends on** must be done first. Gate tasks (
 | Part | Qty | Spec | Status |
 |---|---|---|---|
 | Deck | 1 | Built: about 60 × 38 cm, top about 7 cm off the floor | Have |
-| NEMA 17 steppers (drive) | 2 | 40–48 mm body, about 0.4 N·m | Decided |
-| TMC2209 drivers (drive) | 2 | | Decided |
-| Wheels + hubs for 5 mm shafts | 2 | 72–90 mm | Decided |
+| Drive motors | 4 | One per wheel; NEMA 17 steppers or DC gear motors (confirm with Darren, D10) | Have (Darren) |
+| Wheel motor drivers | 4 (or 2 dual H-bridges for DC motors) | TMC2209s for steppers | Depends on D10 |
+| Wheels + hubs | 4 | 72–90 mm, matched to the motor shafts | Have (Darren) |
 | Motor brackets | 2 | | Decided |
-| Ball or swivel casters | 2 | To replace the two fixed wheels (D10) | Advised |
+| Smoother or narrower tyres | 4 | Only if skid steering struggles to turn (D10) | Open |
 
 **Tray lift**
 
@@ -864,7 +864,7 @@ flowchart LR
 | D7 | Power source | Tether or battery | HW1 | Tether for the event; battery only if everything else is done. |
 | D8 | Training backup | PC only, or PC + cloud GPU | SW1 | If the PC is busy at the event, book cloud time. |
 | D9 | Grip while presenting | Full squeeze or light hold | SW1 | A5 pull test: can a seated person pull the phone out easily, and does it stay put for 60 s? |
-| D10 | Non-driven wheels | Keep the two fixed wheels, or swap them for swivel or ball casters | HW1 (Darren) | Turn the base in place on serial commands. If it turns jerkily, stalls, or parking (B5) misses ±2–3 cm, swap them. |
+| D10 | Drive motors and turning | Stepper or DC motors; left/right pairs or four channels; keep the corner wheel spacing or shorten it | HW1 (Darren) + SW2 | Darren confirms the motors and wiring, and SW2 adapts B3. Then turn the base in place on serial: if it struggles or stalls, shorten the wheelbase or change the tyres. |
 
 ---
 
@@ -1081,7 +1081,7 @@ At hour 6, SW1 decided that the tray and lift are a stretch goal and that the ar
 
 | Time | SW1 + Claude | SW2 + Codex | HW1 (Darren) | HW2 (ClassicDQ) |
 |---|---|---|---|---|
-| 00:30–01:30 (h6–7) | Merge PRs; mock deck; P2 photos at the low camera height (with SW2); A5 claw test (flat phone, face up and down, cases, present-pose hold, pull test) → D1, D9 | P2 photos with the RealSense at its final low height (about 7–12 cm, about 20° down); 150–300 new phone images plus about 50 empty-floor images plus look-alike negatives (remote, wallet, glasses) | B1 drive motors, wheels, casters | C1 front camera post (final) |
+| 00:30–01:30 (h6–7) | Merge PRs; mock deck; P2 photos at the low camera height (with SW2); A5 claw test (flat phone, face up and down, cases, present-pose hold, pull test) → D1, D9 | P2 photos with the RealSense at its final low height (about 7–12 cm, about 20° down); 150–300 new phone images plus about 50 empty-floor images plus look-alike negatives (remote, wallet, glasses) | B1 four driven wheels and motors; turn-in-place test (D10) | C1 front camera post (final) |
 | 01:30–03:30 (h7–9) | A3 teach (with `present`), A4 pick-present-take 3/3 slow then normal; T1/T2 rehearsal (5 throwaway demos, 200-step run) if the PC is reachable. Claude builds A7. | Label and check (REQ-claude-4), P3 YOLO v1 on the PC; B3 wheels-only firmware and B4 driver with Darren | B2 power, E-stop, fuses (no lift branch); B3 wiring with SW2 | C2 wrist camera mount (weighed); arm mount plate with HW1 |
 | 03:30–08:30 (h9–14) | Sleep | Per 14.4 | Per 14.4 | Per 14.4 |
 | 04:30 (h10) | **G1** (SW1's bench result posted before sleeping) | | | |
@@ -1196,7 +1196,7 @@ Requests for you:
 | The claw can't hold the phone up or let go to a pull | Medium | High | Test it in A5; fingertip pads; a lighter hold (D9); suction (C5, stretch) |
 | The phone slips while presenting and counts as taken | Medium | Medium | Firm grip and pads; the person catches it |
 | The present height is too low for a seated person | Medium | Medium | The robot parks close to the chair; the tray lift (stretch) |
-| Fixed wheels scrape when turning, so turns and parking are imprecise | High | High | Swap for swivel or ball casters (D10); slow turns; the camera closes the loop on the phone's position while parking |
+| Skid steering on a long, narrow base turns poorly: the wheels scrub and the motors can stall | Medium | High | Test turning in place as soon as the wheels run (D10); shorten the wheelbase or use smoother tyres; slow turns; the camera closes the loop while parking |
 | The low camera only sees a flat phone out to about 1 m | High | Medium | Demo with the phone within 1 m; train YOLO at imgsz 1280; fall back to a 30–40 cm post (6.3) |
 | RealSense flakiness on macOS (sudo, first-access failures) | Medium | Medium | Retries in P1; keep a USB webcam as a backup front camera |
 | ACT isn't reliable in time | Medium | Medium | The scripted grasp is the demo; ACT only replaces it if it beats it on 10 picks |
