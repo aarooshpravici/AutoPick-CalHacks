@@ -488,7 +488,9 @@ def main(argv=None) -> int:
             return 2
         try:
             from brain.mission import build          # task M1 (SW2): see the Brain protocol above
-        except ImportError:
+        except ImportError as e:
+            if e.name not in ("brain", "brain.mission"):
+                raise   # M1 exists but something it imports is missing: show the real error
             print("error: brain not available yet (task M1: brain/mission.py with build(config, sim)). "
                   "Run without --sim/--real for FakeBrain.", file=sys.stderr)
             return 2

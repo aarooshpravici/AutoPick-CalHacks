@@ -434,6 +434,20 @@ def test_main_real_without_m1_says_so(robot_yaml, no_uvicorn, no_input, monkeypa
     assert no_uvicorn == {}
 
 
+def test_main_shows_a_real_import_error_inside_m1(tmp_path, robot_yaml, no_uvicorn, no_input, monkeypatch):
+    pkg = tmp_path / "brain"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("")
+    (pkg / "mission.py").write_text("import serial_driver_not_installed_xyz\n")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    for name in ("brain", "brain.mission"):
+        monkeypatch.setitem(sys.modules, name, None)   # records the original; restored after the test
+        monkeypatch.delitem(sys.modules, name)
+    with pytest.raises(ModuleNotFoundError, match="serial_driver_not_installed_xyz"):
+        server.main(["--sim", "--config", str(robot_yaml)])
+    assert no_uvicorn == {}
+
+
 def test_main_real_needs_robot_yaml(tmp_path, fake_mission, no_uvicorn, no_input, capsys):
     assert server.main(["--real", "--config", str(tmp_path / "missing.yaml")]) == 2
     assert "robot.yaml" in capsys.readouterr().err
