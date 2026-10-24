@@ -393,7 +393,9 @@ The main call is a hand-off: the arm picks the object, lifts it to the `present`
 
 ```python
 result = pick_to_hand(arm, poses, pan_deg=0.0, roll_deg=0.0, policy=None, speed_deg_s=45,
-                      handoff_timeout_s=60, stop_event=None)
+                      handoff_timeout_s=60, stop_event=None, on_state=None)
+# on_state, if given, is called with "pick", "present" and "wait_for_take" as the arm
+# reaches each stage, so the brain can show Pick / Present / WaitForTake (10.7).
 # result == {"result": "taken" | "timeout" | "missed" | "dropped" | "stuck" | "stopped",
 #            "grasp": "scripted" | "policy", "attempts": 1, "seconds": 31.0, "detail": "..."}
 ```
@@ -578,7 +580,8 @@ flowchart TD
 
 **Dataset (task P2)**
 
-- Photograph with the camera **on its final mount**: 50–100 images per item.
+- Phone only for now; the other items are stretch goals. Aim for 150–300 phone images plus about 50 of empty floor, with look-alikes (remote, wallet, glasses) as negatives.
+- A temporary mount at the final height and tilt (about 35 cm, 40° down) is fine for these photos. P5 adds about 50 photos from the final mount on the venue floor.
 - Vary position, distance, angle and lighting. Include the phone face up, face down and in different cases, plus empty floor.
 - Label boxes in Roboflow, CVAT or Label Studio.
 
@@ -668,7 +671,7 @@ stateDiagram-v2
     note right of Idle
         STOP (page button or the word "stop")
         sends every state to Stopped:
-        wheels stop, arm holds, lift holds.
+        wheels stop, arm holds, lift holds if fitted.
     end note
 ```
 
@@ -688,7 +691,7 @@ These follow the interfaces in 9.6 and 9.7.
 
 **Done when**
 
-- The parser maps 20 test phrases correctly, for example "my glasses fell" → glasses and "can you get my phone" → phone.
+- The parser maps 20 test phrases correctly against the `items` in `robot.yaml` (phone for now), for example "can you get my phone" → phone, and "my glasses fell" → none until glasses are added.
 - "stop" always wins, even with the network off.
 - The STOP button stops a moving robot within 0.5 s.
 
@@ -742,7 +745,7 @@ IDs are referenced on the board. **Depends on** must be done first. Gate tasks (
 | M2 | End-to-end on the real robot | SW2 + SW1 | M1, G2 | 5/5 (10.7) |
 | U1 | Request parser (9.6) | SW1 | S6 | 20/20 phrases; stop works offline |
 | U2 | Status page + STOP (9.7) | SW1 | U1, M1 | STOP within 0.5 s |
-| G1 | **Bench gate** | All | A4, A7, P3, B3 | Hour 6 (00:30 Sat): the scripted pick-and-present is 3/3 on the bench, YOLO v1 detects the phone, and the wheels turn on serial commands |
+| G1 | **Bench gate** | All | A4, A7, P3, B3 | Hour 10 (04:30 Sat): the scripted pick-and-present is 3/3 on the bench (SW1 posts it before sleeping, by hour 9), YOLO v1 detects the phone, and the wheels turn on serial commands |
 | G2 | **On-the-base gate**: arm, front camera and wrist camera on their final mounts, and the base drives on serial | All | B2, B3, C1, C2 | Hour 14.5 (09:00 Sat, assuming an 18:30 Fri kickoff) |
 | G3 | **First end-to-end run** | All | M1, G2; first successful M2 run | Hour 27 |
 | G4 | **Grasp decided; 5/5 end-to-end** | All | M2; T5 if pursuing ACT, otherwise explicit scripted decision | Hour 29 |
@@ -831,7 +834,7 @@ IDs are referenced on the board. **Depends on** must be done first. Gate tasks (
 | Anthropic API key | Confirm |
 | Labelling tool account (Roboflow or similar) | Confirm |
 
-**Demo items and supplies:** two or three phones in different cases (one plain), glasses with thick frames, a pill bottle, a TV remote, a pen, a sock, the demo chair, floor tape; PLA/PETG and TPU filament, M2/M3/M5 screws, heat-set inserts, zip ties.
+**Demo items and supplies:** two or three phones in different cases (one plain); as stretch items, glasses with thick frames, a pill bottle, a TV remote, a pen and a sock (also useful as look-alike negatives for the detector); the demo chair, floor tape; PLA/PETG and TPU filament, M2/M3/M5 screws, heat-set inserts, zip ties.
 
 ---
 
@@ -994,7 +997,7 @@ the contingency hour. If that cycle cannot fit before freeze, keep scripted.
 | 19.5–20.5 | Joint M1/U2 integration and STOP checks in simulation | Joint M1/U2 integration; document remaining real checks | Independent wiring/traction fixes | Sleep |
 | 20.5–25.5 | Independent arm/UI fixes; L3 presets as prerequisites allow | Buffer to 21; sleep 21–25; restart to 25.5 | Independent fixes; no task that needs sleeping SW2 | Sleep until 21; restart to 21.5; independent mechanical fixes afterward |
 | 25.5–27 | **Joint M2 slot: all four people available; verify physical prerequisites before moving hardware** | ← | ← | ← |
-| **27** | **G3: first real request-to-tray-raised run** | | | |
+| **27** | **G3: first real request-to-phone-presented run** | | | |
 | 27–29 | Joint failure fixes, repeat runs and grasp decision | Joint runs, logging and measured results | Power/traction support | Lift/tray support |
 | **29** | **G4: grasp decided; 5/5 end-to-end runs** | | | |
 | 29–30 | **Reserved contingency:** fix or roll back integration failures; no new features | ← | ← | ← |
@@ -1008,7 +1011,7 @@ teammate's hours. Re-estimate the downstream joint slots on issue #1.
 
 1. Voice input
 2. Battery
-3. Hand-height v2 (keep the presets)
+3. Hand-height v2 (keep the fixed present pose)
 4. Search (start with the phone in view)
 5. ACT (keep the scripted grasp)
 
@@ -1056,8 +1059,8 @@ Update the board with an owner and estimated ready time for each blocked handoff
 |---|---|---|---|---|
 | **D435 access, USB 3 and final front mount (S4/P1/C1)** | HW1 provides the base; HW2 fixes the mount; SW2 validates capture | P2 photos → P3 detector → P4 mapping → B5 parking | Real colour/depth capture and P1 fps result; mount 30–40 cm high at about 40° down; grab spot visible; geometry recorded | Reader/fake-camera tests, B4 fake serial, labelling setup. Synthetic images do not satisfy P2/P3 |
 | **Power, drive wiring and E-stop (B1/B2 → B3)** | HW1 + SW2 | Real drive/watchdog checks, B5/B6 and M2 | Confirmed pin map, driver settings, wheel size/track width; common ground and E-stop checked; real commands and USB-loss watchdog pass | Firmware review and driver simulation; no powered motion until the person clears the area |
-| **Mast, home switch and load cell (L1 → L2)** | HW2 + SW2; HW1 for power | Safe lift, take detection, L3 and full M2 | Switch polarity, travel limits, load-cell wiring and calibration recorded; home/height repeatability ±5 mm, 5/5; taken-item checks pass | Fake lift/weight scenarios and preset UI; never equate fake completion with load-bearing acceptance |
-| **Final arm/tray geometry (G2 → A6 → P4/B5)** | HW1/HW2 secure mounts; SW1 teaches; SW2 measures | Accurate parking and repeatable floor-to-tray picks | Re-taught poses on final base, reachable tray, measured grab spot; homography within 2 cm at 3 points; parking ±2–3 cm in 8/10 trials | Simulated arm/parking tests. A moved mount invalidates the relevant measurements |
+| **Mast, home switch and load cell (L1 → L2), stretch** | HW2 + SW2; HW1 for power | The stretch tray lift only | Switch polarity, travel limits, load-cell wiring and calibration recorded; home/height repeatability ±5 mm, 5/5; taken-item checks pass | Fake lift/weight scenarios and preset UI; never equate fake completion with load-bearing acceptance |
+| **Final arm geometry (G2 → A6 → P4/B5)** | HW1/HW2 secure mounts; SW1 teaches; SW2 measures | Accurate parking and repeatable floor-to-hand picks | Re-taught poses on final base, reachable present pose, measured grab spot; homography within 2 cm at 3 points; parking ±2–3 cm in 8/10 trials | Simulated arm/parking tests. A moved mount invalidates the relevant measurements |
 | **Gripper contact and wrist payload (A5/C4 or C5/C2)** | SW1 + HW2 | Reliable scripted grasp and useful ACT demonstrations | Phone pickup decision D1, tested pads or suction, weighed wrist camera/mount; repeatable bench pick | Pick retries and failure-path tests; do not train around an unresolved mechanical grasp failure |
 | **Stable cameras plus measured parking (C2/P4/B5 → T4)** | SW1 records; SW2 parks; HW2 keeps mounts fixed | ACT dataset, training and checkpoint validation | Recording rehearsal succeeds; camera names/indices fixed; parking spread measured; both software engineers awake for recording | T1–T3 tooling and scripted fallback. Moving a camera after recording requires new demonstrations |
 | **Shared robot Mac, ports and GPU time** | SW1 + SW2; hardware owners for cables/power | Camera/arm access, live perception, training turnaround | One owner per port/camera; runtime pins match the intended environment; GPU is free and training ETA leaves validation time before freeze | Offline tests and logs. Do not count sleeping time as interactive setup or assume a queued job will finish |
@@ -1080,15 +1083,19 @@ At hour 6, SW1 decided that the tray and lift are a stretch goal and that the ar
 | 00:30–01:30 (h6–7) | Merge PRs; mock deck; A5 claw test (flat phone, face up and down, cases, present-pose hold, pull test) → D1, D9 | P2 photos: RealSense on a temporary 35 cm, 40° mount; 150–300 new phone images plus about 50 empty-floor images plus look-alike negatives (remote, wallet, glasses) | B1 drive motors, wheels, casters | C1 front camera post (final) |
 | 01:30–03:30 (h7–9) | A3 teach (with `present`), A4 pick-present-take 3/3 slow then normal; T1/T2 rehearsal (5 throwaway demos, 200-step run) if the PC is reachable. Claude builds A7. | Label and check (REQ-claude-4), P3 YOLO v1 on the PC; B3 wheels-only firmware and B4 driver with Darren | B2 power, E-stop, fuses (no lift branch); B3 wiring with SW2 | C2 wrist camera mount (weighed); arm mount plate with HW1 |
 | 03:30–08:30 (h9–14) | Sleep | Per 14.4 | Per 14.4 | Per 14.4 |
+| 04:30 (h10) | **G1** (SW1's bench result posted before sleeping) | | | |
 | 08:30–09:00 | Check the arm and wrist camera on the base | Base drives on serial | Arm, camera post onto the base | Mounts finished |
 | 09:00 (h14.5) | **G2** | | | |
 | 09:00–09:45 | A6 re-teach on the base (with `present`) | P4 floor homography and parking spot on the final mount | Traction, wiring fixes | C4 fingertip pads (after D1) |
 | 09:45–11:30 | T4: 50 demos (SW2 parks) | Park for demos, measure precision | Support | Lift (stretch) only if nothing else is open |
 | 11:30–15:30 (h17–21) | Convert, start 20k-step training (T5); A7 and U2 with the brain; scripted end-to-end | M1 brain (new states), B5 parking, B6 search | Reliability fixes | Support |
-| 15:30 (h21) | **G3** first end-to-end: request → phone presented → taken (scripted grasp) | | | |
-| 15:30–22:30 (h21–28) | T5 test checkpoints; T6 round 2 if needed; end-to-end runs | P5 venue top-up; robustness | Spares | Lift (stretch) |
-| 22:30 (h28) | **G4** grasp decided, 5/5 end-to-end | | | |
+| 15:30–21:30 (h21–27) | T5 test checkpoints; T6 round 2 if needed; scripted end-to-end runs | M2 with SW1; P5 venue top-up; robustness | Spares | Lift (stretch) |
+| 21:30 (h27) | **G3** first end-to-end: request → phone presented → taken | | | |
+| 21:30–23:30 (h27–29) | End-to-end runs with the chosen grasp | End-to-end runs, logging | Support | Support |
+| 23:30 (h29) | **G4** grasp decided, 5/5 end-to-end | | | |
 | 00:30 Sun (h30) | **G5** freeze, backup video | | | |
+
+G1, G3, G4 and G5 keep the hours set in 14.2 and 14.3. Only G2 moves, from hour 12 to hour 14.5, because the base with the arm mounted is due at 09:00.
 
 ---
 
