@@ -1,0 +1,14 @@
+# The `lerobot` environment (plan 8.2): Python 3.12, on the Mac and the training PC.
+# torch / torchvision must match on both machines so checkpoints load (plan 20).
+# Mac:  python3.12 -m venv .venv && .venv/bin/pip install -r requirements-lerobot.txt
+# PC:   install the CUDA build of the same torch/torchvision first, then this file.
+lerobot[feetech]==0.6.1
+torch==2.11.0
+torchvision==0.26.0
+feetech-servo-sdk==1.0.0
+pyserial==3.5
+pyyaml==6.0.3
+fastapi==0.162.0
+uvicorn==0.54.0
+anthropic==2.3.0
+pytest==9.1.1
