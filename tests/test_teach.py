@@ -389,7 +389,7 @@ def fake_hardware(monkeypatch):
                 raise OSError("port vanished")
 
     class FakeRealArm(SimArm):
-        def __init__(self, port, robot_id, max_relative_target):
+        def __init__(self, port, robot_id, max_relative_target, frozen=()):
             if "follower" in hw.fail_open:
                 raise RuntimeError("no matching calibration for the follower")
             super().__init__()

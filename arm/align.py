@@ -25,20 +25,25 @@ class AlignError(RuntimeError):
     pass
 
 
-def mismatched(leader: dict, follower: dict) -> list[str]:
-    """The joints that don't match yet."""
+def mismatched(leader: dict, follower: dict, ignore=()) -> list[str]:
+    """The joints that don't match yet (frozen joints in `ignore` never count)."""
     out = []
     for j in JOINTS:
+        if j in ignore:
+            continue
         tol = ALIGN_GRIPPER if j == "gripper" else ALIGN_DEG
         if abs(leader[j] - follower[j]) > tol:
             out.append(j)
     return out
 
 
-def table(leader: dict, follower: dict) -> list[str]:
-    bad = set(mismatched(leader, follower))
+def table(leader: dict, follower: dict, ignore=()) -> list[str]:
+    bad = set(mismatched(leader, follower, ignore))
     lines = [f"{'joint':14}{'leader':>9}{'follower':>10}{'diff':>8}"]
     for j in JOINTS:
+        if j in ignore:
+            lines.append(f"{j:14}{leader[j]:9.1f}{'frozen':>10}{'':>8}  - not used (never moves)")
+            continue
         unit = "" if j == "gripper" else "°"
         mark = "✗ move the leader" if j in bad else "✓"
         lines.append(f"{j:14}{leader[j]:9.1f}{follower[j]:10.1f}{leader[j] - follower[j]:+7.1f}{unit}  {mark}")
@@ -81,6 +86,7 @@ def live_align(leader, follower, *, enter=None, out=None, max_s: float | None = 
     when it changes."""
     enter = enter or _enter_from_stdin
     out = out or sys.stdout
+    ignore = tuple(getattr(follower, "frozen", ()))         # e.g. the frozen wrist roll
     tty = bool(getattr(out, "isatty", lambda: False)())
     period = 1.0 / REFRESH_HZ
     rejected = False
@@ -90,7 +96,7 @@ def live_align(leader, follower, *, enter=None, out=None, max_s: float | None = 
         out.write(ALT_SCREEN_ON)
     try:
         while True:
-            lines = table(leader.read(), follower.read())
+            lines = table(leader.read(), follower.read(), ignore)
             if rejected:
                 lines.append("Not yet: some joints don't match.")
             if tty:
@@ -100,7 +106,7 @@ def live_align(leader, follower, *, enter=None, out=None, max_s: float | None = 
             out.flush()
             last = lines
             if enter(period):
-                if not mismatched(leader.read(), follower.read()):
+                if not mismatched(leader.read(), follower.read(), ignore):
                     break
                 rejected = True
             if max_s is not None and time.monotonic() - t0 > max_s:

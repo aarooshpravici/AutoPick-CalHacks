@@ -269,7 +269,8 @@ def main(argv=None) -> int:
             # The leader is read-only, so open it first: if it fails, the follower is never touched.
             leader = RealLeader(port=cfg["leader_port"], robot_id=cfg["leader_id"])
             follower = RealArm(port=cfg["follower_port"], robot_id=cfg["follower_id"],
-                               max_relative_target=cfg["max_relative_target_deg"])
+                               max_relative_target=cfg["max_relative_target_deg"],
+                               frozen=cfg["frozen_joints"])
             wait_for = enter_waiter
             align = align_mod.live_align
         print(f"teaching at {speed:g} deg/s" + (" (dry run, no hardware)" if args.dry_run else ""),

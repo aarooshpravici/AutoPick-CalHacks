@@ -23,6 +23,7 @@ START_FRACTION = 0.2       # torque limit when the torque comes on, as a fractio
 RAMP_S = 1.5               # then ramped up to the cap over this long
 RAMP_STEPS = 10
 CONNECT_TRIES = 5          # a missed handshake on the bus is retried
+FROZEN_READING = 0.0       # what read() reports for a frozen joint: it never moves, so any constant
 
 
 def _torque_cap(motor: str) -> int:
@@ -40,9 +41,16 @@ def _import_follower():
 
 class RealArm:
     def __init__(self, port: str, robot_id: str, max_relative_target: float, *,
-                 ramp_s: float | None = None, sleep=None):
+                 frozen=(), ramp_s: float | None = None, sleep=None):
         """max_relative_target: LeRobot's per-command step cap in degrees, from robot.yaml
-        arm.max_relative_target_deg. Required: None would mean no cap at all."""
+        arm.max_relative_target_deg. Required: None would mean no cap at all.
+        frozen: arm joints (robot.yaml arm.frozen_joints) whose servos are never called: the
+        bus is built without them, read() reports them at FROZEN_READING and command() drops
+        them. Used for the follower's faulty wrist-roll servo (id 5)."""
+        self.frozen = tuple(frozen)
+        bad = [j for j in self.frozen if j not in JOINTS or j == "gripper"]
+        if bad:
+            raise ValueError(f"frozen joints must be arm joints (not the gripper), got {bad}")
         if (not isinstance(max_relative_target, numbers.Real) or isinstance(max_relative_target, bool)
                 or not math.isfinite(max_relative_target) or max_relative_target <= 0):
             raise ValueError(f"max_relative_target must be a positive number of degrees, "
@@ -60,12 +68,24 @@ class RealArm:
         ramp_s = RAMP_S if ramp_s is None else ramp_s
         sleep = sleep or time.sleep
         self.robot = SO101Follower(SO101FollowerConfig(**kwargs))
+        if self.frozen:
+            self._drop_frozen_motors()
         self._hold_on_enable()
         self._connect(sleep)
         if not self.robot.is_calibrated:
             self.robot.bus.disconnect(disable_torque=False)
             raise RuntimeError(f"no matching calibration for '{robot_id}'; run task A1 (lerobot-calibrate) first")
         self._ramp_torque(ramp_s, sleep)
+
+    def _drop_frozen_motors(self) -> None:
+        """Rebuild the bus without the frozen motors, before it ever connects: no packet goes to
+        them, not the handshake, not a read, not a write. They stay as they are, held by their
+        gears (torque off after a power cycle)."""
+        bus = self.robot.bus
+        self.robot.bus = type(bus)(
+            bus.port, {m: v for m, v in bus.motors.items() if m not in self.frozen},
+            calibration={m: c for m, c in bus.calibration.items() if m not in self.frozen},
+            protocol_version=bus.protocol_version)
 
     def _hold_on_enable(self) -> None:
         """Make every torque-enable hold the motors where they are, at a low torque limit."""
@@ -112,10 +132,10 @@ class RealArm:
 
     def read(self) -> dict:
         obs = self.robot.get_observation()
-        return {j: float(obs[f"{j}.pos"]) for j in JOINTS}
+        return {j: FROZEN_READING if j in self.frozen else float(obs[f"{j}.pos"]) for j in JOINTS}
 
     def command(self, targets: dict) -> None:
-        action = {f"{j}.pos": float(v) for j, v in targets.items() if j in JOINTS}
+        action = {f"{j}.pos": float(v) for j, v in targets.items() if j in JOINTS and j not in self.frozen}
         if "gripper.pos" in action:
             action["gripper.pos"] = min(100.0, max(0.0, action["gripper.pos"]))
         self.robot.send_action(action)
