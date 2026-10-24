@@ -14,8 +14,11 @@ function el(id) {
   if (!els[id]) {
     const listeners = {};
     els[id] = {
-      id, textContent: "", value: "", hidden: id === "stopfail", attrs: {}, children: [], innerHTML: "",
+      id, textContent: "", value: "", hidden: id === "stopfail", attrs: {}, children: [], placeholder: "",
+      checked: id === "clarify", className: "",         // the setting is on by default
       dataset: {}, listeners,
+      set innerHTML(v) { this.children = []; },
+      get innerHTML() { return ""; },
       addEventListener(type, fn) { listeners[type] = fn; },
       setAttribute(k, v) { this.attrs[k] = v; },
       append(child) { this.children.push(child); },
@@ -24,7 +27,8 @@ function el(id) {
   }
   return els[id];
 }
-globalThis.document = {getElementById: el, addEventListener() {}};
+globalThis.document = {getElementById: el, addEventListener() {},
+                       createElement(tag) { const b = el("new-" + tag + "-" + Math.random()); b.tag = tag; return b; }};
 globalThis.Image = class { constructor() { this.dataset = {}; } };
 globalThis.setInterval = () => 0;          // scenarios call refresh() themselves
 
@@ -44,6 +48,12 @@ const count = path => seen.filter(p => p === path).length;
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const submit = text => { el("text").value = text; return el("ask").listeners.submit({preventDefault() {}}); };
 const clickStop = () => el("stop").listeners.click();
+// The question page shows: its option buttons' labels, and a tap on one.
+const options = () => el("opts").children.map(b => b.textContent);
+const tap = label => el("opts").children.find(b => b.textContent === label).listeners.click();
+const bodies = [];      // every /request body sent, parsed
+const ASK = {action: "ask", item: null, hand: null, question: "What did you drop?", options: ["phone", "pen"]};
+const FETCH = {action: "fetch", item: "phone", hand: "standing", question: null, options: []};
 // One /status round, after the page's own first refresh() has finished (it drops overlapping calls).
 const poll = async () => { await sleep(10); await refresh(); };
 
@@ -118,6 +128,75 @@ const scenarios = {
     routes["/request"] = () => reply(200, {parsed: {action: "fetch", item: "phone"}, dropped: "stopped"});
     await submit("my phone");
     assert.strictEqual(el("reply").textContent, "Cancelled: STOP was pressed");
+  },
+  async question_is_shown_with_option_buttons() {
+    routes["/request"] = opts => { bodies.push(JSON.parse(opts.body)); return reply(200, {parsed: ASK}); };
+    await submit("I dropped something");
+    assert.deepStrictEqual(bodies, [{text: "I dropped something", hand: "", clarify: true, dialog: []}]);
+    assert.strictEqual(el("question").hidden, false);
+    assert.match(el("question").textContent, /What did you drop\?/);
+    assert.match(el("question").children[0].textContent, /Question 1 of up to 4/);
+    assert.deepStrictEqual(options(), ["phone", "pen"]);
+    assert.ok(el("opts").children.every(b => b.className === "opt" && b.tag === "button"));
+    assert.strictEqual(el("text").placeholder, "Your answer");
+    assert.strictEqual(el("cancel").hidden, false);
+    assert.strictEqual(el("text").value, "", "box cleared for the answer");
+  },
+  async tapping_an_option_reposts_with_the_dialog() {
+    let n = 0;
+    routes["/request"] = opts => { bodies.push(JSON.parse(opts.body)); return reply(200, {parsed: n++ ? FETCH : ASK}); };
+    await submit("I dropped something");
+    await tap("phone");
+    assert.deepStrictEqual(bodies[1], {text: "I dropped something", hand: "", clarify: true,
+                                       dialog: [{question: "What did you drop?", answer: "phone"}]});
+    assert.strictEqual(el("reply").textContent, "Fetching: phone (standing)");
+    assert.strictEqual(el("question").hidden, true, "the conversation is over");
+    assert.deepStrictEqual(options(), []);
+    assert.strictEqual(el("text").placeholder, "I dropped my phone");
+    await submit("my pen");                  // a new request starts with no dialog
+    assert.deepStrictEqual(bodies[2].dialog, []);
+    assert.strictEqual(bodies[2].text, "my pen");
+  },
+  async typing_an_answer_posts_it_as_the_answer_to_the_question() {
+    let n = 0;
+    routes["/request"] = opts => { bodies.push(JSON.parse(opts.body)); return reply(200, {parsed: n++ ? FETCH : ASK}); };
+    await submit("I dropped something");
+    await submit("my phone");
+    assert.deepStrictEqual(bodies[1].dialog, [{question: "What did you drop?", answer: "my phone"}]);
+    assert.strictEqual(bodies[1].text, "I dropped something");
+  },
+  async stop_clears_the_conversation() {
+    routes["/request"] = opts => { bodies.push(JSON.parse(opts.body)); return reply(200, {parsed: ASK}); };
+    routes["/stop"] = () => reply(200, {stopped: true});
+    await submit("I dropped something");
+    assert.strictEqual(el("question").hidden, false);
+    clickStop();
+    await sleep(20);
+    assert.strictEqual(el("question").hidden, true);
+    assert.deepStrictEqual(options(), []);
+    assert.strictEqual(count("/stop"), 1);
+    await submit("my pen");                  // starts afresh, not as an answer
+    assert.deepStrictEqual(bodies[1], {text: "my pen", hand: "", clarify: true, dialog: []});
+    await submit("stop");                    // typed stop words clear it too
+    await sleep(20);
+    assert.strictEqual(el("question").hidden, true);
+    assert.strictEqual(count("/stop"), 2);
+  },
+  async cancel_clears_the_conversation_without_stopping() {
+    routes["/request"] = opts => { bodies.push(JSON.parse(opts.body)); return reply(200, {parsed: ASK}); };
+    await submit("I dropped something");
+    el("cancel").listeners.click();
+    assert.strictEqual(el("question").hidden, true);
+    assert.strictEqual(count("/stop"), 0);
+    await submit("my pen");
+    assert.deepStrictEqual(bodies[1].dialog, []);
+  },
+  async clarify_setting_off_sends_no_dialog_and_hand_seated() {
+    el("clarify").checked = false;
+    routes["/request"] = opts => { bodies.push(JSON.parse(opts.body)); return reply(200, {parsed: {action: "fetch", item: "pen"}}); };
+    await submit("my pen fell");
+    assert.deepStrictEqual(bodies, [{text: "my pen fell", hand: "seated"}]);
+    assert.strictEqual(el("reply").textContent, "Fetching: pen");
   },
   async only_one_status_request_at_a_time() {
     await sleep(10);
