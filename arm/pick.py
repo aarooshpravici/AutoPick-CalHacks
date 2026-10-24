@@ -448,12 +448,23 @@ def load_policy(path, cameras: dict | None = None, config_path: str | Path | Non
         raise
 
 
+def _camera_size(size) -> tuple[int, int] | None:
+    """None, or (width, height) as two positive whole numbers; anything else is a ValueError."""
+    if size is None:
+        return None
+    if (isinstance(size, (tuple, list)) and len(size) == 2
+            and all(isinstance(v, numbers.Integral) and not isinstance(v, bool) and v > 0 for v in size)):
+        return int(size[0]), int(size[1])
+    raise ValueError(f"camera_size must be None or (width, height), two positive whole numbers; got {size!r}")
+
+
 def _pick(mode, sequence, arm, poses, pan_deg, roll_deg, policy, speed_deg_s, stop_event, log,
           camera_size=None) -> dict:
     """Shared by pick_to_hand and pick_to_tray. Checks the arguments and the poses `mode`
     needs before anything moves, then runs sequence(picker, policy, result).
     policy may be a checkpoint folder: its webcams are opened here and closed at the end,
     at camera_size (width, height) if given, else at the checkpoint's image size."""
+    camera_size = _camera_size(camera_size)
     if not (_is_number(speed_deg_s) and 0 < speed_deg_s <= MAX_SPEED_DEG_S):
         raise ValueError(f"speed_deg_s must be in (0, {MAX_SPEED_DEG_S:g}] deg/s (plan section 17), "
                          f"got {speed_deg_s!r}")
@@ -513,7 +524,9 @@ def pick_to_tray(arm, poses, pan_deg=0.0, roll_deg=0.0, policy=None, speed_deg_s
     """Pick the object at the parking spot and drop it in the tray (stretch). See the module
     docstring. Needs the `above_tray` pose (not `present`).
     stop_event: set it from another thread to stop; the arm holds where it is.
-    policy may be a checkpoint folder: its webcams are opened here and closed at the end."""
+    policy may be a checkpoint folder: its webcams are opened here and closed at the end.
+    camera_size: (width, height) to open them at when a webcam can't deliver the checkpoint's
+    image size itself (same aspect ratio; frames are resized as at recording)."""
     return _pick("tray", _Picker.run_tray, arm, poses, pan_deg, roll_deg, policy, speed_deg_s, stop_event, log,
                  camera_size)
 

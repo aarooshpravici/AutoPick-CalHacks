@@ -206,7 +206,6 @@ def main(argv=None) -> int:
     p.add_argument("--height", type=_count, default=HEIGHT, help=f"default {HEIGHT}")
     args = p.parse_args(argv)
 
-    os.environ["HF_HUB_OFFLINE"] = "1"      # local datasets only: never fall back to the Hub
     summary = convert(args.src, args.dst, args.width, args.height)
     for key, (before, after) in summary["cameras"].items():
         print(f"{key}: {before[0]}x{before[1]} -> {after[0]}x{after[1]}")
@@ -215,4 +214,7 @@ def main(argv=None) -> int:
 
 
 if __name__ == "__main__":
+    # Local datasets only: never fall back to the Hub. Set here, before LeRobot is imported, and
+    # only for this command's process (main() also runs inside tests).
+    os.environ["HF_HUB_OFFLINE"] = "1"
     sys.exit(main())

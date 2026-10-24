@@ -33,7 +33,8 @@ runs them together, with no hardware and no network, and reports each stage:
            checkpoint's cameras, image sizes and state/action shapes against the
            dataset, and takes one policy step.
   run      One simulated pick_to_hand(arm, poses, policy=DIR), as the brain will call
-           it, to a result. Any result is fine (the policy has barely trained); the
+           it (with camera_size, the recorded size, after a convert), to a result, and
+           a check of the size the webcams were opened at. Any result is fine (the policy has barely trained); the
            point is that every interface lines up.
 
 Everything goes under OUT (default: a new temporary folder): datasets, the stand-in
@@ -447,17 +448,26 @@ def load_stage(out: Path, checkpoint: Path, dataset_root: Path,
             f"as {opened}{resized}; one step from ready -> " + ", ".join(f"{j} {action[j]:.1f}" for j in JOINTS))
 
 
-def run_stage(out: Path, checkpoint: Path, log) -> str:
+def run_stage(out: Path, checkpoint: Path, log, capture_size: tuple[int, int] | None = None) -> str:
+    """capture_size: the size the demos were recorded at, when they were converted (camera_size)."""
     holder = {"arm": SimArm()}
+    expected = {name: capture_size or size for name, size in policy_mod.checkpoint_image_sizes(checkpoint).items()}
     with sim_hardware(out, holder) as webcam:
         t0 = time.monotonic()
-        result = pick.pick_to_hand(holder["arm"], DEFAULT_POSES, policy=str(checkpoint), log=log)
+        result = pick.pick_to_hand(holder["arm"], DEFAULT_POSES, policy=str(checkpoint), log=log,
+                                   camera_size=capture_size)
         seconds = time.monotonic() - t0
     if not webcam.opened or not all(c.closed for c in webcam.opened):
         raise RuntimeError("pick_to_hand did not open and close its webcams")
+    opened = {c.name: c.size for c in webcam.opened}
+    if opened != expected:
+        sizes = lambda cams: ", ".join(f"{n} {w}x{h}" for n, (w, h) in sorted(cams.items()))
+        raise RuntimeError(f"pick_to_hand opened the webcams as {sizes(opened)}, not {sizes(expected)}")
+    cams = ", ".join(f"{c.name} {c.size[0]}x{c.size[1]} @ {c.fps} fps" for c in webcam.opened)
     return (f"pick_to_hand -> {result['result']} (grasp {result['grasp']}, {result['attempts']} attempt(s), "
             f"{result['seconds']} s simulated, {seconds:.1f} s real; arm ended with the object "
-            f"{holder['arm'].object}){': ' + result['detail'] if result['detail'] else ''}")
+            f"{holder['arm'].object}; webcams opened as {cams})"
+            f"{': ' + result['detail'] if result['detail'] else ''}")
 
 
 # --- the rehearsal -----------------------------------------------------------------
@@ -495,7 +505,7 @@ def rehearse(out: Path, steps: int = 20, episodes: int = 3, scene: bool = False,
     stages = [("record", do_record), ("convert", do_convert), ("train", do_train),
               ("load", lambda: load_stage(out, state["checkpoint"], state["dataset"],
                                           record_size if converted else None)),
-              ("run", lambda: run_stage(out, state["checkpoint"], log))]
+              ("run", lambda: run_stage(out, state["checkpoint"], log, record_size if converted else None))]
     failed = False
     for name, stage in stages:
         if failed:

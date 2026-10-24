@@ -4,6 +4,10 @@ Nothing is read from or written to the repo's data/ or the Hugging Face caches i
 
 import hashlib
 import json
+import os
+import subprocess
+import sys
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -229,3 +233,22 @@ def test_default_size_is_what_act_trains_on(tmp_path):
     convert.main(["--src", str(src), "--dst", str(tmp_path / "out")])
     assert info(tmp_path / "out")["features"]["observation.images.wrist"]["shape"] == [record.HEIGHT,
                                                                                        record.WIDTH, 3]
+
+
+def test_main_leaves_the_environment_alone(sources, tmp_path, monkeypatch):
+    """Calling main() (as these tests do) must not switch the rest of the process offline."""
+    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+    convert.main(["--src", str(sources["video"]), "--dst", str(tmp_path / "out"),
+                  "--width", "32", "--height", "18"])
+    assert "HF_HUB_OFFLINE" not in os.environ
+
+
+def test_the_command_runs_offline():
+    """python -m training.convert switches the Hub off before LeRobot is imported."""
+    code = ("import os, runpy, sys\nsys.argv = ['convert', '--help']\n"
+            "try:\n    runpy.run_module('training.convert', run_name='__main__')\nexcept SystemExit:\n    pass\n"
+            "print('HF_HUB_OFFLINE=' + os.environ.get('HF_HUB_OFFLINE', ''))")
+    env = {k: v for k, v in os.environ.items() if k != "HF_HUB_OFFLINE"}
+    r = subprocess.run([sys.executable, "-c", code], cwd=Path(__file__).resolve().parent.parent, env=env,
+                       capture_output=True, text=True, timeout=60, check=True)
+    assert r.stdout.splitlines()[-1] == "HF_HUB_OFFLINE=1"

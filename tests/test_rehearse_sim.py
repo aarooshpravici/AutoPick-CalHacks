@@ -225,6 +225,45 @@ def test_checkpoint_check_catches_a_mismatch(tmp_path, policy, cams, names, word
         rehearse_sim.check_checkpoint(policy, root)
 
 
+class DrivingAct(StubAct):
+    """Stands in for ActGrasp: heads to at_object, then asks for a closed claw."""
+
+    def reset(self):
+        pass
+
+    def step(self, state):
+        target = dict(DEFAULT_POSES["at_object"])
+        near = all(abs(state[j] - target[j]) < 2 for j in JOINTS[:5])
+        target["gripper"] = DEFAULT_POSES["gripper_closed"] if near else DEFAULT_POSES["gripper_open"]
+        return target
+
+
+def wrist_checkpoint(tmp_path):
+    ckpt = tmp_path / "pretrained_model"
+    ckpt.mkdir()
+    (ckpt / "config.json").write_text(json.dumps({"type": "act", "input_features": {
+        "observation.state": {"type": "STATE", "shape": [6]},
+        "observation.images.wrist": {"type": "VISUAL", "shape": [3, 180, 320]}}}))
+    return ckpt
+
+
+@pytest.mark.parametrize("capture, opened", [(None, "320x180"), ((640, 360), "640x360")])
+def test_run_stage_opens_the_webcams_at_the_recorded_size(tmp_path, monkeypatch, no_hardware, capture, opened):
+    """A converted rehearsal recorded at 640x360: pick_to_hand must open the webcams at 640x360."""
+    monkeypatch.setattr(policy_mod, "ActGrasp", DrivingAct)
+    detail = rehearse_sim.run_stage(tmp_path, wrist_checkpoint(tmp_path), lambda m: None, capture_size=capture)
+    assert detail.startswith("pick_to_hand -> taken")
+    assert f"webcams opened as wrist {opened} @ {pick.RATE_HZ} fps" in detail
+
+
+def test_run_stage_checks_the_size_the_webcams_opened_at(tmp_path, monkeypatch, no_hardware):
+    monkeypatch.setattr(policy_mod, "ActGrasp", DrivingAct)
+    real = pick.pick_to_hand
+    monkeypatch.setattr(pick, "pick_to_hand", lambda *a, camera_size=None, **kw: real(*a, **kw))   # drops it
+    with pytest.raises(RuntimeError, match="640x360"):
+        rehearse_sim.run_stage(tmp_path, wrist_checkpoint(tmp_path), lambda m: None, capture_size=(640, 360))
+
+
 def test_checkpoint_check_passes_when_everything_lines_up(tmp_path):
     root = write_info(tmp_path / "ds", {"wrist": (320, 180)})
     assert rehearse_sim.check_checkpoint(StubPolicy({"wrist": (320, 180)}), root) == "wrist 320x180"
@@ -257,6 +296,8 @@ def test_whole_pipeline_rehearsal(tmp_path, extra, converts):
     assert outcomes == {"record": "ok", "convert": "ok" if converts else "skipped", "train": "ok", "load": "ok",
                         "run": "ok"}
     assert "pick_to_hand -> " in report
+    run = next(line for line in report.splitlines() if line.startswith("run "))
+    assert ("webcams opened as wrist 640x360" if converts else "webcams opened as wrist 320x180") in run
     ckpts = list((out / "checkpoints" / rehearse_sim.NAME).glob("*/pretrained_model/model.safetensors"))
     assert len(ckpts) == 1
     trained = json.loads((ckpts[0].parent / "train_config.json").read_text())["policy"]
