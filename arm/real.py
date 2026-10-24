@@ -50,3 +50,27 @@ class RealArm:
             self.robot.disconnect()
         else:
             self.robot.bus.disconnect(disable_torque=False)
+
+
+class RealLeader:
+    """The SO-101 leader arm (read only; it's moved by hand)."""
+
+    def __init__(self, port: str, robot_id: str):
+        from lerobot.teleoperators.so_leader import SO101Leader, SO101LeaderConfig
+
+        fields = {f.name for f in dataclasses.fields(SO101LeaderConfig)}
+        kwargs = {"port": port, "id": robot_id}
+        if "use_degrees" in fields:
+            kwargs["use_degrees"] = True
+        self.leader = SO101Leader(SO101LeaderConfig(**kwargs))
+        self.leader.connect(calibrate=False)
+        if not self.leader.is_calibrated:
+            self.leader.disconnect()
+            raise RuntimeError(f"no matching calibration for '{robot_id}'; run task A1 (lerobot-calibrate) first")
+
+    def read(self) -> dict:
+        action = self.leader.get_action()
+        return {j: float(action[f"{j}.pos"]) for j in JOINTS}
+
+    def close(self) -> None:
+        self.leader.disconnect()
