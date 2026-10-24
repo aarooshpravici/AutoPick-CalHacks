@@ -1,0 +1,40 @@
+# S6: SW1 and SW2 approved on the team board, including the calibration IDs below.
+# Runtime: LeRobot 0.6.2 / Python 3.12; perception runs separately on Python 3.10.
+# Ports, camera indices and dimensions below are placeholders until measured.
+arm:
+  follower_port: /dev/tty.usbmodem58CD1767761  # 12 V arm; found with lerobot-find-port on SW1's Mac
+  leader_port: /dev/tty.usbmodem58760435221    # 5 V arm
+  follower_id: so101_follower_arm     # Existing calibration on SW1's robot Mac.
+  leader_id: so101_leader_arm
+  max_relative_target_deg: 10
+  move_speed_deg_s: 45               # Override to 25 for first real runs.
+cameras:                             # Fixed ACT names; verify indices after replugging.
+  wrist: 1
+  scene: 2                           # Optional; recording enables it explicitly.
+  mast_top: 3
+realsense:
+  colour: [1280, 720]
+  depth: [848, 480]
+  fps: 30
+  align_depth_to_colour: true
+  flip: false                        # Rotate colour and depth 180 degrees if inverted.
+base:
+  serial_port: /dev/tty.usbserial-XXXX
+  baud: 115200
+  wheel_diameter_mm: 72
+  track_width_mm: 260                 # Measure on the built base.
+  max_speed_mm_s: 200                 # First real runs must stay at or below 100.
+perception:
+  detections_udp: 127.0.0.1:5601
+  hand_udp: 127.0.0.1:5602
+  # Floor origin: directly below front camera; x forward, y left, metres.
+  parking_spot_floor_m: [0.22, 0.0]   # Replace with the P4 measurement.
+  parking_tolerance_m: 0.02
+handoff:
+  timeout_s: 60                       # seconds holding at the present pose before giving up
+  grip: squeeze                       # squeeze (firm) or light; decided by the A5 pull test (D9)
+lift:
+  seated_hand_mm: 700
+  standing_hand_mm: 1000
+  taken_weight_drop_g: 50
+items: [phone]                        # stretch: glasses, pill_bottle, remote, pen, sock

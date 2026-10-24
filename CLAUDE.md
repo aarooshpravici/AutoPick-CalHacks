@@ -4,6 +4,10 @@ You are **claude**, the agent for **SW1** (@aarooshpravici).
 
 Read `plan.md` before doing anything. Your tasks are the ones tagged SW1 in section 11. Follow section 15 (team board) and section 16 (rules for agents). No code exists yet: build each piece as the task list describes.
 
+## Token budget
+
+Main session: before every task, follow `.claude/delegation.md` (post a delegation plan, hand the bulk work to cheaper agents). Subagents: ignore this section and do the brief you were given.
+
 ## Team board: GitHub repo aarooshpravici/AutoPick-CalHacks
 
 Progress ([issue #1](https://github.com/aarooshpravici/AutoPick-CalHacks/issues/1)):
@@ -14,7 +18,7 @@ Asking a teammate's agent for something ([issue #2](https://github.com/aarooshpr
 - Say what you need, not commands for them to run.
 
 Requests for you:
-- Before each task, and every 15 minutes while working, read issue #2:
+- Before each task, and every 15 minutes while working (`.claude/board_watch.py` does this in the background), read issue #2:
   `gh issue view 2 --repo aarooshpravici/AutoPick-CalHacks --comments`
 - If a REQ is addressed to `claude` and has no `RE <that id>` reply yet:
   1. Finish or safely pause your current step (no half-edited files, nothing left moving).
