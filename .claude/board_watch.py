@@ -19,7 +19,9 @@ NAME = "claude"
 MAX_FAILURES = 5
 
 REQ = re.compile(r"\b(REQ-[A-Za-z0-9]+-\d+)\s*(?:→|->)\s*([A-Za-z0-9_-]+)")
-REPLY = re.compile(r"\bRE\s+(REQ-[A-Za-z0-9]+-\d+)")
+# A reply is a line that starts with "RE REQ-…", so a request quoting the
+# reply format ("reply with `RE REQ-claude-1`") doesn't count as answered.
+REPLY = re.compile(r"^\s*RE\s+(REQ-[A-Za-z0-9]+-\d+)", re.MULTILINE)
 
 
 def pending_requests(comments, name=NAME, skip=()):
