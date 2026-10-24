@@ -378,6 +378,9 @@ def main(argv=None) -> int:
                 old_handlers[sig] = signal.signal(sig, lambda *_: stop_event.set())
         cfg = load_arm_config(args.config)
         speed = resolve_speed(args.speed, cfg)
+        for flag, value in (("--pan", args.pan), ("--roll", args.roll)):   # before any hardware opens
+            if not _is_number(value):
+                raise ValueError(f"{flag} must be a finite number, got {value!r}")
         if args.dry_run:
             from .sim import DEFAULT_POSES, SimArm
             poses = poses_mod.load(args.poses) if args.poses.exists() else DEFAULT_POSES
