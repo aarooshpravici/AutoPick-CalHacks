@@ -2,8 +2,8 @@
 # Runtime: LeRobot 0.6.2 / Python 3.12; perception runs separately on Python 3.10.
 # Ports, camera indices and dimensions below are placeholders until measured.
 arm:
-  follower_port: /dev/tty.usbmodemXXXX  # Discover on SW1's robot Mac.
-  leader_port: /dev/tty.usbmodemYYYY
+  follower_port: /dev/tty.usbmodem58CD1767761  # 12 V arm; found with lerobot-find-port on SW1's Mac
+  leader_port: /dev/tty.usbmodem58760435221    # 5 V arm
   follower_id: so101_follower_arm     # Existing calibration on SW1's robot Mac.
   leader_id: so101_leader_arm
   max_relative_target_deg: 10
