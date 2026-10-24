@@ -705,10 +705,10 @@ IDs are referenced on the board. **Depends on** must be done first. Gate tasks (
 | M2 | End-to-end on the real robot | SW2 + SW1 | M1, G2 | 5/5 (10.7) |
 | U1 | Request parser (9.6) | SW1 | S6 | 20/20 phrases; stop works offline |
 | U2 | Status page + STOP (9.7) | SW1 | U1, M1 | STOP within 0.5 s |
-| G1 | **Bench gate** | All | A4, P3, B3, L1 | Hour 6 |
+| G1 | **Bench gate** | All | A4, P3, B3, L1 | Hour 10 |
 | G2 | **On-the-base gate**: arm, cameras, mast on the deck, final mounts | All | B2, C1, C2, L1 | Hour 12 |
-| G3 | **First end-to-end run** | All | M2 | Hour 21 |
-| G4 | **Grasp decided; 5/5 end-to-end** | All | T5, M2 | Hour 28 |
+| G3 | **First end-to-end run** | All | M1, G2; first successful M2 run | Hour 27 |
+| G4 | **Grasp decided; 5/5 end-to-end** | All | M2; T5 if pursuing ACT, otherwise explicit scripted decision | Hour 29 |
 | G5 | **Feature freeze**: only fixes after this | All | G4 | Hour 30 |
 
 ---
@@ -838,108 +838,135 @@ The plan assumes **all code is written during the event**. Check the event's rul
 4. **Demo items:** phones in cases, glasses, pill bottle, remote, pen, sock; measure the demo chair's hand height (D2).
 5. **Read-up:** LeRobot's SO-101 calibration and recording guides, the RealSense macOS notes in [section 20](#20-technical-notes-and-known-pitfalls), and FastAccelStepper's examples.
 
-### 14.2 The 36 hours
+### 14.2 The 36 hours, including sleep buffers
+
+Hours are elapsed from kickoff, not wall-clock times. At kickoff, map them to the
+event's local start time and confirm each person's availability. This revision
+keeps the existing **four-hour sleep blocks** and reserves **30 minutes before
+and 30 minutes after** each one: **five hours unavailable per person**. If someone
+needs a longer rest window, replan scope and joint sessions rather than counting
+their sleep as available work.
+
+The schedule below is a target, conditional on the hardware handoffs in 14.5.
+An elapsed hour never makes an unfinished task pass its acceptance check.
+G1 moves to hour 10 so it follows the scheduled firmware bench work. G2 at hour
+12 means the hardware is installed on its final mounts; A6 re-teaching and
+P4/B5 parking validation follow it. G3 moves to hour 27, after everyone has
+returned from sleep and restart buffers. G4 is hour 29; hour 29–30 is reserved
+for integration overruns before the unchanged hour-30 feature freeze.
 
 ```mermaid
 gantt
-    title 36-hour build (the axis shows Day 1 00:00 as hour 0)
+    title 36-hour build with protected sleep and handoffs
     dateFormat YYYY-MM-DD HH:mm
-    axisFormat Day %e %H:00
+    axisFormat Day %e %H:%M
     tickInterval 6hour
 
     section Everyone
-    Kickoff, repo, board, interfaces     :k1, 2000-01-01 00:00, 1h
-    G1 bench gate                        :milestone, g1, 2000-01-01 06:00, 0h
-    G2 on-the-base gate                  :milestone, g2, 2000-01-01 12:00, 0h
-    G3 first end-to-end run              :milestone, g3, 2000-01-01 21:00, 0h
-    G4 grasp decided, 5 of 5 runs        :milestone, g4, 2000-01-02 04:00, 0h
+    Kickoff and interface agreement      :k1, 2000-01-01 00:00, 1h
+    G1 bench checks                      :milestone, g1, 2000-01-01 10:00, 0h
+    G2 final hardware mounts             :milestone, g2, 2000-01-01 12:00, 0h
+    G3 first end-to-end run              :milestone, g3, 2000-01-02 03:00, 0h
+    G4 grasp decided and 5 of 5 runs     :milestone, g4, 2000-01-02 05:00, 0h
     G5 feature freeze                    :milestone, g5, 2000-01-02 06:00, 0h
 
     section SW1 (Claude)
-    Calibrate arms, teleop check         :a1, 2000-01-01 01:00, 1h
-    Pick module and sim tests            :a2, after a1, 2h
-    Teach, bench scripted pick           :a3, after a2, 2h
-    Phone test, parser, status page      :a4, after a3, 2h
-    ACT pipeline rehearsal               :a5, after a4, 2h
-    Arm on the base, re-teach            :a6, after a5, 2h
-    Record 50 demos                      :a7, after a6, 2h
-    Convert, start training              :a8, after a7, 1h
-    Sleep                                :s1, after a8, 4h
-    Test checkpoints                     :a9, after s1, 2h
-    Hand height, brain integration       :a10, after a9, 3h
-    End-to-end runs, ACT round 2         :a11, after a10, 4h
-    Tuning                               :a12, after a11, 2h
-    Freeze, rehearse, backup video       :a13, after a12, 4h
-    Present                              :a14, after a13, 2h
+    Arm setup and bench pick             :a1, 2000-01-01 01:00, 5h
+    Parser and UI scaffold plus optional ACT prep :a2, after a1, 4h
+    Mount arm then re-teach and support parking :a3, after a2, 4h
+    Prepare arm and UI handoff           :a4, after a3, 30m
+    Shutdown and handoff buffer          :a5, after a4, 30m
+    Sleep                               :s1, after a5, 4h
+    Wake and restart buffer             :a6, after s1, 30m
+    Joint brain and UI integration       :a7, after a6, 1h
+    Independent fixes and preset UI      :a8, after a7, 5h
+    Joint end-to-end and reliability runs :a9, after a8, 210m
+    Integration contingency              :a10, after a9, 1h
+    Rehearse and backup demo             :a11, after a10, 4h
+    Present                             :a12, after a11, 2h
 
     section SW2 (Codex)
-    RealSense reader, mount check        :b1, 2000-01-01 01:00, 2h
-    Photos, labels, YOLO v1              :b2, after b1, 2h
-    ESP32 firmware                       :b3, after b2, 2h
-    Base driver, detection publisher     :b4, after b3, 2h
-    Floor calibration, parking           :b5, after b4, 3h
-    Parking for demo recording           :b6, after b5, 2h
-    Brain state machine                  :b7, after b6, 4h
-    First end-to-end run                 :b8, after b7, 3h
-    Sleep                                :s2, after b8, 4h
-    Venue floor top-up, robustness       :b9, after s2, 3h
-    Tuning, logging                      :b10, after b9, 2h
-    Freeze, rehearse, backup video       :b11, after b10, 4h
-    Present                              :b12, after b11, 2h
+    Perception setup and reader plus fake base driver :b1, 2000-01-01 01:00, 3h
+    Photos and YOLO then firmware bench checks :b2, after b1, 6h
+    Integrate on base                    :b3, after b2, 2h
+    Floor calibration and parking with SW1 :b4, after b3, 2h
+    Final lift checks with HW2           :b5, after b4, 150m
+    Brain simulation                    :b6, after b5, 3h
+    Joint brain and UI integration       :b7, after b6, 1h
+    Shutdown and handoff buffer          :b8, after b7, 30m
+    Sleep                               :s2, after b8, 4h
+    Wake and restart buffer             :b9, after s2, 30m
+    Joint end-to-end and reliability runs :b10, after b9, 210m
+    Integration contingency              :b11, after b10, 1h
+    Rehearse and backup demo             :b12, after b11, 4h
+    Present                             :b13, after b12, 2h
 
-    section HW1 (base, power)
-    Deck, drive wheels, casters          :c1, 2000-01-01 01:00, 4h
-    Power, E-stop, fuses                 :c2, after c1, 2h
-    Electronics bay, arm mount plate     :c3, after c2, 3h
-    Integrate arm, camera post, mast     :c4, after c3, 2h
-    Support demo recording               :c5, after c4, 1h
-    Sleep                                :s3, after c5, 4h
-    Traction, wobble, wiring fixes       :c6, after s3, 7h
-    Support runs, spares, fixes          :c7, after c6, 6h
-    Demo prep, safety check              :c8, after c7, 4h
-    Present                              :c9, after c8, 2h
+    section HW1 (base and power)
+    Deck and drive train                 :c1, 2000-01-01 01:00, 3h
+    Power and E-stop                     :c2, after c1, 2h
+    Bench wiring with SW2 and electronics bay :c3, after c2, 4h
+    Final integration and handoff prep   :c4, after c3, 150m
+    Shutdown and handoff buffer          :c5, after c4, 30m
+    Sleep                               :s3, after c5, 4h
+    Wake and restart buffer             :c6, after s3, 30m
+    Independent wiring and traction fixes :c7, after c6, 8h
+    Joint end-to-end and reliability runs :c8, after c7, 210m
+    Integration contingency              :c9, after c8, 1h
+    Rehearse and safety checks           :c10, after c9, 4h
+    Present                             :c11, after c10, 2h
 
-    section HW2 (mast, tray, mounts)
-    Mast, carriage, belt, switch         :d1, 2000-01-01 01:00, 3h
-    Tray and load cell                   :d2, after d1, 2h
-    Camera mounts, fingertip pads        :d3, after d2, 2h
-    Suction or mast bracing              :d4, after d3, 2h
-    Integrate onto the base              :d5, after d4, 2h
-    Lift tests, cable chain              :d6, after d5, 5h
-    Sleep                                :s4, after d6, 4h
-    Hand-height tests with SW1           :d7, after s4, 3h
-    Fixes, finishing                     :d8, after d7, 6h
-    Demo prep                            :d9, after d8, 4h
-    Present                              :d10, after d9, 2h
+    section HW2 (mast and mounts)
+    Mast and tray assembly plus camera mount prep :d1, 2000-01-01 01:00, 3h
+    Final front camera and wrist mounts  :d2, after d1, 2h
+    Lift bench wiring with SW2 and gripper support :d3, after d2, 4h
+    Final integration and mechanical checks :d4, after d3, 4h
+    Final lift checks with SW2           :d5, after d4, 150m
+    Shutdown and handoff buffer          :d6, after d5, 30m
+    Sleep                               :s4, after d6, 4h
+    Wake and restart buffer             :d7, after s4, 30m
+    Independent mechanical fixes        :d8, after d7, 4h
+    Joint end-to-end and reliability runs :d9, after d8, 210m
+    Integration contingency              :d10, after d9, 1h
+    Rehearse and demo prep               :d11, after d10, 4h
+    Present                             :d12, after d11, 2h
 ```
 
-### 14.3 Hour by hour
+### 14.3 Work windows and gates
+
+The sleep table in 14.4 controls availability within the broader work windows.
+The committed demo path uses the scripted grasp and preset tray heights.
+T1–T3 preparation can use spare SW1 time, but **T4–T6 are conditional work**:
+recording needs both software engineers, stable mounts and measured parking;
+training and checkpoint validation need their own time estimates. Do not book
+50 demos, training or a second ACT round over sleep, joint acceptance tests or
+the contingency hour. If that cycle cannot fit before freeze, keep scripted.
 
 | Hours | SW1 + Claude | SW2 + Codex | HW1 | HW2 |
 |---|---|---|---|---|
-| 0–1 | **Everyone:** kickoff, confirm hardware (section 2), folder layout and collaborators (S1, S2), agree interfaces (S6) | ← | ← | ← |
-| 1–2 | S3, A1: calibrate both arms, teleop check | S4, P1: RealSense reader | B1: cut the deck | L1: mast and carriage |
-| 2–4 | A2: pick module + simulated arm + tests | P1 (cont.), temporary camera mount at the final height with HW2 | B1: drive steppers, wheels, casters | L1: belt, pulley, limit switch |
-| 4–6 | A3, A4: teach on a mock deck, bench scripted pick | P2, P3: photos, labels, YOLO v1 | B1 (cont.) → B2 starts | L1: tray, load cell mount |
-| **6** | **G1 bench gate:** scripted pick 3/3 on the bench; YOLO v1 detects the phone; wheels turn on serial commands; tray moves by hand | | | |
-| 6–8 | A5 phone test → D1; U1 request parser; U2 page | B3: ESP32 firmware on the bench | B2: power, E-stop, fuses, capacitor | C1–C3 camera mounts; C4 pads |
-| 8–10 | T1, T2: recording setup, remote training rehearsal (5 demos, 200 steps) | B4: base driver + fake serial; detection publisher | B3 bench wiring with SW2; electronics bay | C5 suction if D1 = no, else mast bracing |
-| 10–12 | Help mount the arm; A6 re-teach on the base | P4, B5: floor calibration, parking controller | Integrate arm, camera post, mast (with HW2) | Integrate onto the base |
-| **12** | **G2 on-the-base gate:** everything on its final mount; parking within ±3 cm; lift homes and moves | | | |
-| 12–14 | T4: record 50 demos (SW2 parks the base) | Park repeatedly for demos; measure precision | Support recording | L2 lift tests with SW2 |
-| 14–15 | Convert; start 20k-step training on the PC | M1: brain state machine | Sleep (13–17) | Lift tests, cable chain |
-| 15–19 | **Sleep** (training runs meanwhile) | M1 (cont.) with simulated parts | Sleep, then traction and wobble fixes | Lift tests (to 17), then sleep (17–21) |
-| 19–21 | T5: test checkpoints as they arrive | M2: first end-to-end run | Wiring fixes | Sleep |
-| **21** | **G3: first end-to-end run** (request to tray raised) | | | |
-| 21–24 | L3 hand height; integrate the grasp into the brain | **Sleep** (21–25) | Reliability fixes | L3 hand-height tests with SW1 |
-| 24–28 | End-to-end runs; T6 round 2 if needed | P5 venue top-up; robustness (lost detection, retries) | Support runs, spares | Fixes, finishing |
-| **28** | **G4: grasp decided (ACT or scripted); 5/5 end-to-end runs** | | | |
-| 28–30 | Tuning | Tuning, logging | Support | Finishing |
-| **30** | **G5 feature freeze:** only fixes from here; record the backup demo video | | | |
-| 30–34 | Rehearse the demo 5+ times; slides | Rehearse; watch the logs | Safety check, transport | Demo prep |
+| 0–1 | Kickoff; agree interfaces and joint sessions | S6; confirm camera access | Confirm parts, power and wiring plan | Confirm mast and mount geometry |
+| 1–4 | S3, A1–A3: setup, simulated pick, teaching | S4/P1; B4 fake serial after S6 approval | B1 deck and drive train | L1 assembly; prepare C1/C2 mounts |
+| 4–6 | A4/A5 bench pick and grasp decision | P2 starts only after C1 is accepted; labels and P3 prep | B2 power and E-stop | Finish C1/C2; verify grab spot in image with SW2 |
+| 6–10 | U1; U2 scaffold; T1/T2 rehearsal only if prerequisites and time allow | Finish P2/P3, then B3/L2 bench work with HW1/HW2 | Wiring and B3 bench checks with SW2 | L1/L2 bench support; C4 or conditional C5 |
+| **10** | **G1: bench checks pass, including real drive commands and watchdog; otherwise report the failed gate** | | | |
+| 10–12 | Help integrate arm | Integrate camera, serial and detection streams | Secure base, power and electronics | Secure mast, tray and final camera mounts |
+| **12** | **G2: physical integration ready; this does not certify re-taught poses or parking accuracy** | | | |
+| 12–14 | A6 re-teach; share final grab pose with SW2 | P4 homography/parking spot, then B5 trials with SW1 | Handoff prep to 12.5; buffer 12.5–13; sleep from 13 | Mechanical checks; preserve final mounts |
+| 14–16.5 | Handoff prep to 14.5; buffer to 15; then sleep | L2 final lift/load-cell checks with HW2 | Sleep | Joint L2 checks; cable routing and handoff prep |
+| 16.5–19.5 | Sleep until 19; restart to 19.5 | M1 simulated mission | Sleep until 17; restart to 17.5; independent fixes afterward | Buffer 16.5–17; sleep afterward |
+| 19.5–20.5 | Joint M1/U2 integration and STOP checks in simulation | Joint M1/U2 integration; document remaining real checks | Independent wiring/traction fixes | Sleep |
+| 20.5–25.5 | Independent arm/UI fixes; L3 presets as prerequisites allow | Buffer to 21; sleep 21–25; restart to 25.5 | Independent fixes; no task that needs sleeping SW2 | Sleep until 21; restart to 21.5; independent mechanical fixes afterward |
+| 25.5–27 | **Joint M2 slot: all four people available; verify physical prerequisites before moving hardware** | ← | ← | ← |
+| **27** | **G3: first real request-to-tray-raised run** | | | |
+| 27–29 | Joint failure fixes, repeat runs and grasp decision | Joint runs, logging and measured results | Power/traction support | Lift/tray support |
+| **29** | **G4: grasp decided; 5/5 end-to-end runs** | | | |
+| 29–30 | **Reserved contingency:** fix or roll back integration failures; no new features | ← | ← | ← |
+| **30** | **G5: feature freeze; only fixes afterward** | | | |
+| 30–34 | Rehearse, record backup video, prepare slides | Rehearse and monitor logs | Safety check, transport, spares | Demo prep and finishing |
 | 34–36 | **Present** | ← | ← | ← |
 
-**If a gate is missed:** cut from the bottom of this list first.
+**If a gate is missed:** cut optional scope in this order, starting with item 1.
+Do not recover time by consuming sleep, its transition buffers or an absent
+teammate's hours. Re-estimate the downstream joint slots on issue #1.
 
 1. Voice input
 2. Battery
@@ -947,7 +974,64 @@ gantt
 4. Search (start with the phone in view)
 5. ACT (keep the scripted grasp)
 
-Never cut the scripted grasp, the E-stop or the STOP button.
+Never cut the scripted grasp, the E-stop or the STOP button. If prerequisites
+for a gate still fail, record it as failed rather than treating simulation as
+hardware acceptance or promising the original demo unchanged.
+
+### 14.4 Protected sleep and handoff buffers
+
+| Person | Shutdown and handoff buffer | Sleep | Wake and restart buffer | Unavailable interval |
+|---|---|---|---|---|
+| HW1 | 12.5–13 | 13–17 | 17–17.5 | 12.5–17.5 (5 h) |
+| SW1 | 14.5–15 | 15–19 | 19–19.5 | 14.5–19.5 (5 h) |
+| HW2 | 16.5–17 | 17–21 | 21–21.5 | 16.5–21.5 (5 h) |
+| SW2 | 20.5–21 | 21–25 | 25–25.5 | 20.5–25.5 (5 h) |
+
+- **Before sleep:** post the exact branch/PR, tests passed or failed, ports and
+  processes in use, hardware state, next action and blocker on issue #1. Rest the
+  arm and lower/support the tray with the responsible person before shutdown;
+  do not leave raised hardware relying on an unattended powered motor.
+- **During sleep:** the owner is unavailable for approvals, wiring questions,
+  calibration, passwords and live tests. Their agent does not stand in for those
+  human responsibilities. Only already-authorized compute jobs that need no
+  hardware motion or interactive response may continue; name an awake monitor
+  and save logs before the owner leaves.
+- **After sleep:** use the restart buffer to read the board, inspect changes,
+  verify ports/camera indices and recover the environment. Book no joint test
+  until this buffer ends. Recheck hardware readiness with the responsible person.
+- **Book paired work before the earlier owner's buffer:** HW1/SW2 bench handoff
+  before 12.5, SW1/SW2 poses/parking handoff before 14.5, and HW2/SW2 lift handoff
+  before 16.5. SW1/SW2 have another joint slot at 19.5–20.5; all four are available
+  together again at 25.5. A blocked handoff is logged and rescheduled, not silently
+  assigned to the sleeping person.
+- **Contingency is separate:** hour 29–30 absorbs integration failures. It is
+  not extra feature capacity, and a late GPU job does not move feature freeze.
+
+### 14.5 Software–hardware bottlenecks and acceptance handoffs
+
+This table names dependencies, not claims that the hardware already exists.
+As of SW2's latest availability report, the D435 is unavailable; S4/P1 live
+checks and P2 photos remain blocked until a person confirms camera access.
+Update the board with an owner and estimated ready time for each blocked handoff.
+
+| Bottleneck / handoff | Who must coordinate | What it blocks | Evidence needed to unblock | Work possible while waiting |
+|---|---|---|---|---|
+| **D435 access, USB 3 and final front mount (S4/P1/C1)** | HW1 provides the base; HW2 fixes the mount; SW2 validates capture | P2 photos → P3 detector → P4 mapping → B5 parking | Real colour/depth capture and P1 fps result; mount 30–40 cm high at about 40° down; grab spot visible; geometry recorded | Reader/fake-camera tests, B4 fake serial, labelling setup. Synthetic images do not satisfy P2/P3 |
+| **Power, drive wiring and E-stop (B1/B2 → B3)** | HW1 + SW2 | Real drive/watchdog checks, B5/B6 and M2 | Confirmed pin map, driver settings, wheel size/track width; common ground and E-stop checked; real commands and USB-loss watchdog pass | Firmware review and driver simulation; no powered motion until the person clears the area |
+| **Mast, home switch and load cell (L1 → L2)** | HW2 + SW2; HW1 for power | Safe lift, take detection, L3 and full M2 | Switch polarity, travel limits, load-cell wiring and calibration recorded; home/height repeatability ±5 mm, 5/5; taken-item checks pass | Fake lift/weight scenarios and preset UI; never equate fake completion with load-bearing acceptance |
+| **Final arm/tray geometry (G2 → A6 → P4/B5)** | HW1/HW2 secure mounts; SW1 teaches; SW2 measures | Accurate parking and repeatable floor-to-tray picks | Re-taught poses on final base, reachable tray, measured grab spot; homography within 2 cm at 3 points; parking ±2–3 cm in 8/10 trials | Simulated arm/parking tests. A moved mount invalidates the relevant measurements |
+| **Gripper contact and wrist payload (A5/C4 or C5/C2)** | SW1 + HW2 | Reliable scripted grasp and useful ACT demonstrations | Phone pickup decision D1, tested pads or suction, weighed wrist camera/mount; repeatable bench pick | Pick retries and failure-path tests; do not train around an unresolved mechanical grasp failure |
+| **Stable cameras plus measured parking (C2/P4/B5 → T4)** | SW1 records; SW2 parks; HW2 keeps mounts fixed | ACT dataset, training and checkpoint validation | Recording rehearsal succeeds; camera names/indices fixed; parking spread measured; both software engineers awake for recording | T1–T3 tooling and scripted fallback. Moving a camera after recording requires new demonstrations |
+| **Shared robot Mac, ports and GPU time** | SW1 + SW2; hardware owners for cables/power | Camera/arm access, live perception, training turnaround | One owner per port/camera; runtime pins match the intended environment; GPU is free and training ETA leaves validation time before freeze | Offline tests and logs. Do not count sleeping time as interactive setup or assume a queued job will finish |
+| **System STOP and lift holding** | SW1 + SW2 + HW1 + HW2 | Real M2 and U2 STOP acceptance | Approved serial/brain contract implemented and tested together; wheel stop, arm hold and lift hold meet 0.5 s; physical E-stop behavior assessed separately | Simulated STOP tests and interface review. REQ-codex-2 has both people's approval for a separate implementation/section-9.5 PR; approval alone is not a passing hardware test |
+
+**Critical path for the core demo:** camera + final mount → labelled photos →
+live detector; in parallel, powered base + firmware and final arm poses →
+measured parking; working lift + load-cell checks + integrated brain/STOP → M2.
+The slowest of these converging paths sets the first real demo time. ACT adds
+another dependency chain after stable parking; it must not hold up the scripted
+baseline. Before anyone sleeps, identify which path is blocked and which awake
+person can actually advance it.
 
 ---
 
