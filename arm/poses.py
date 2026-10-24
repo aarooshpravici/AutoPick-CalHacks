@@ -35,6 +35,7 @@ TEACH_HINT = {"hand": "python -m arm.teach", "tray": "python -m arm.teach --with
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_POSES_PATH = REPO_ROOT / "config" / "poses.json"
+MIN_CLAW_GAP = 10.0         # gripper_open and gripper_closed at least this far apart (0-100 scale)
 
 
 class PosesError(ValueError):
@@ -65,8 +66,8 @@ def validate(poses: dict, mode: str | None = None) -> dict:
     for key in ("gripper_open", "gripper_closed"):
         if not isinstance(poses.get(key), (int, float)):
             raise PosesError(f"'{key}' is missing")
-    if abs(poses["gripper_open"] - poses["gripper_closed"]) < 10:
-        raise PosesError("gripper_open and gripper_closed are less than 10 apart; re-teach them")
+    if abs(poses["gripper_open"] - poses["gripper_closed"]) < MIN_CLAW_GAP:
+        raise PosesError(f"gripper_open and gripper_closed are less than {MIN_CLAW_GAP:g} apart; re-teach them")
     return poses
 
 
