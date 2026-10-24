@@ -26,7 +26,14 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(self.driver.tray_grams(), 125)
         self.driver.tare()
         self.assertEqual(self.driver.tray_grams(), 0)
-        self.assertEqual(self.port.commands[:5], ["PING", "DRIVE 50 -25", "STOP", "LIFT_HOME", "LIFT_TO 700"])
+        self.assertEqual(self.port.commands[:7], ["PING", "DRIVE 50 -25", "STOP", "STOP", "LIFT_HOME", "STOP", "LIFT_TO 700"])
+
+    def test_lift_stops_wheels_before_raising(self):
+        self.driver.lift_home()
+        self.driver.drive(50, 50)
+        self.driver.lift_to(700)
+        self.assertEqual((self.port.left, self.port.right, self.port.lift_mm), (0, 0, 700))
+        self.assertEqual(self.port.commands[-2:], ["STOP", "LIFT_TO 700"])
 
     def test_limits_and_nonfinite_values(self):
         for speeds in ((201, 0), (0, -201), (float("nan"), 1), (1, float("inf"))):

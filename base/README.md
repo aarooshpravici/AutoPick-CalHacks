@@ -24,7 +24,8 @@ Wheel speeds are mm/s. Lift targets are mm above the home switch, limited by
 the configured presets. Status includes wheel step counts, lift mm, tray grams,
 E-stop and a monotonic reception time. Nonzero driving requires fresh status,
 E-stop released, and tray at zero with no lift command in progress. Homing is
-required by the fake firmware before lifting. The real firmware must enforce
+required by the fake firmware before lifting. Every lift command first sends
+STOP to the wheels. The real firmware must enforce
 the same physical interlocks independently.
 
 Replies and asynchronous STAT messages are separated by a background reader.

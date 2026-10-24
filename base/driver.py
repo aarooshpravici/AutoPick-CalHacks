@@ -171,6 +171,7 @@ class BaseDriver:
 
     def lift_home(self):
         self._lift_blocked = True
+        self.stop()
         self._request("LIFT_HOME", lambda reply: reply == "LIFT_HOMED")
         self._lift_blocked = False
 
@@ -180,6 +181,7 @@ class BaseDriver:
             raise ValueError("lift height outside configured presets")
         target = f"{mm:g}"
         self._lift_blocked = True
+        self.stop()
         self._request(f"LIFT_TO {target}",
                       lambda reply: reply.startswith("LIFT_AT ") and finite(reply[8:]) == float(target))
         self._lift_blocked = mm != 0
@@ -268,7 +270,7 @@ class FakeSerial:
                     reply = "LIFT_HOMED"
                 elif len(parts) == 2 and parts[0] == "LIFT_TO" and not self.estop:
                     height = finite(parts[1])
-                    if not self.homed or not 0 <= height <= self.max_lift:
+                    if not self.homed or not 0 <= height <= self.max_lift or self.left or self.right:
                         raise ValueError("home lift first or invalid height")
                     self.lift_mm = height
                     reply = f"LIFT_AT {height:g}"
