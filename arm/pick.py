@@ -201,12 +201,17 @@ class _Picker:
             state = self.arm.read()
             try:
                 action = policy.step(state)
-            except BaseException:   # camera stalled or inference failed: hold the arm, then report
+                target = {k: float(action[k]) for k in (*ARM_JOINTS, "gripper")}
+                # A NaN target would slip through the speed cap below as a full step every frame.
+                bad = [k for k, v in target.items() if not math.isfinite(v)]
+                if bad:
+                    raise ValueError(f"policy returned a non-finite target for {', '.join(bad)}")
+            except BaseException:   # camera stalled, inference failed or a bad target: hold, then report
                 self._hold()
                 raise
             for j in ARM_JOINTS:     # same speed cap as scripted moves
-                cmd[j] += max(-max_step, min(max_step, float(action[j]) - cmd[j]))
-            grip = float(action["gripper"])
+                cmd[j] += max(-max_step, min(max_step, target[j] - cmd[j]))
+            grip = target["gripper"]
             self._send(cmd, grip)
             g = state["gripper"]
             still = abs(g - last_grip) <= GRIP_STILL_DEG

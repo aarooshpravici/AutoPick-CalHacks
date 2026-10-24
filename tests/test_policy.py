@@ -292,6 +292,45 @@ def test_policy_failure_holds_the_arm_and_raises():
     assert all(sent[-1][j] == pytest.approx(pos[j]) for j in poses_mod.ARM_JOINTS)
 
 
+def _spy_on_hold(monkeypatch):
+    calls = []
+    original = pick._Picker._hold
+    monkeypatch.setattr(pick._Picker, "_hold", lambda self: (calls.append(1), original(self)))
+    return calls
+
+
+def test_policy_failure_calls_hold(monkeypatch):
+    class Stalls(ScriptedPolicy):
+        def step(self, state):
+            if self.steps == 20:
+                raise TimeoutError("camera latest frame is too old")
+            return super().step(state)
+
+    holds = _spy_on_hold(monkeypatch)
+    with pytest.raises(TimeoutError):
+        pick.pick_to_tray(SimArm(), DEFAULT_POSES, policy=Stalls())
+    assert holds == [1]
+
+
+@pytest.mark.parametrize("key", ["shoulder_pan", "elbow_flex", "gripper"])
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), np.float32("nan")])
+def test_policy_non_finite_target_holds_instead_of_creeping(monkeypatch, key, bad):
+    class Broken(ScriptedPolicy):
+        def step(self, state):
+            action = super().step(state)
+            return {**action, key: bad} if self.steps >= 20 else action
+
+    arm = SimArm()
+    sent = []
+    command = arm.command
+    arm.command = lambda t: (sent.append(dict(t)), command(t))
+    holds = _spy_on_hold(monkeypatch)
+    with pytest.raises(ValueError, match=key):
+        pick.pick_to_tray(arm, DEFAULT_POSES, policy=Broken())
+    assert holds == [1]
+    assert all(np.isfinite(v) for t in sent for v in t.values())   # nothing non-finite reached the arm
+
+
 class JumpyPolicy:
     """Asks for wild targets: the speed cap must still hold."""
 
