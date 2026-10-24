@@ -1,0 +1,11 @@
+# Python 3.10. Separate from the LeRobot 0.6.2 / Python 3.12 environment.
+pyrealsense2-mac==2.54.1; sys_platform == "darwin"
+pyrealsense2==2.54.1.5217; sys_platform == "linux"
+numpy==1.26.4
+ultralytics==8.3.40
+mediapipe==0.10.21
+# Both distributions are required by upstream dependency metadata; keep versions equal.
+opencv-python==4.11.0.86
+opencv-contrib-python==4.11.0.86
+PyYAML==6.0.2
+pytest==8.3.5
