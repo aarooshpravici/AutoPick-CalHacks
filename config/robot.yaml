@@ -25,6 +25,8 @@ base:
   track_width_mm: 260                 # Measure on the built base.
   max_speed_mm_s: 200                 # First real runs must stay at or below 100.
 perception:
+  detector_weights: data/models/phone_v2.pt  # Local file; never committed.
+  detector_conf: 0.5
   detections_udp: 127.0.0.1:5601
   hand_udp: 127.0.0.1:5602
   # Floor origin: directly below front camera; x forward, y left, metres.
