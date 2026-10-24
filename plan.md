@@ -1,10 +1,10 @@
 # Floor Picker: Project Plan
 
-A mobile robot for people who can't easily bend down. Someone says "I dropped my phone"; the robot finds the phone on the floor, drives to it, picks it up with an arm, drops it into a tray, and raises the tray up a mast to the person's hand.
+A mobile robot for people who can't easily bend down. Someone says "I dropped my phone"; the robot finds the phone on the floor, drives to it, picks it up with an arm and holds it up for the person to take.
 
 **This file is written for AI coding agents** (Claude Code for SW1, Codex for SW2) and the four people they work for. Agents start from this file alone, with no other history. Read all of it before doing anything.
 
-> **Starting point: no code exists yet.** This repository contains only this plan, the agent instruction files (`CLAUDE.md`, `AGENTS.md`), a README, a licence and a `.gitignore`. Every script, module, config file and firmware file named below is still to be written. Do not look for existing code; there is none. Build each piece as the task list describes.
+> **Starting point: code exists for many tasks.** It is in `main` and in open pull requests. Before building a piece, check `main` and the open PRs and task branches, and don't rebuild something that exists. Whatever is still missing is built as the task list describes.
 
 Diagrams are [Mermaid](https://mermaid.js.org). They render on GitHub, in VS Code's Markdown preview (with a Mermaid extension) and in Obsidian. Elsewhere they appear as code blocks.
 
@@ -55,13 +55,14 @@ Repository instruction files:
 
 | Area | Status at the start |
 |---|---|
-| **Code** | **None.** No scripts, modules, firmware or configs exist yet. Everything in sections 8–11 is to be written. |
-| **Repository** | [aarooshpravici/AutoPick-CalHacks](https://github.com/aarooshpravici/AutoPick-CalHacks) (private). It holds this plan and the agent instruction files; no code. Issues [#1 Progress](https://github.com/aarooshpravici/AutoPick-CalHacks/issues/1) and [#2 Requests](https://github.com/aarooshpravici/AutoPick-CalHacks/issues/2) are the team board. |
+| **Code** | **Exists for many tasks**, in `main` and in open PRs. Before building, check `main`, the open PRs and the task branches, and don't rebuild something that exists. Only what is still missing is to be written (sections 8–11). |
+| **Repository** | [aarooshpravici/AutoPick-CalHacks](https://github.com/aarooshpravici/AutoPick-CalHacks) (private). It holds this plan, the agent instruction files and the code merged so far; more is in open PRs. Issues [#1 Progress](https://github.com/aarooshpravici/AutoPick-CalHacks/issues/1) and [#2 Requests](https://github.com/aarooshpravici/AutoPick-CalHacks/issues/2) are the team board. |
 | **Arm hardware** | SO-101 leader and follower arms with their bus servo boards. The follower runs on 12 V, the leader on 5 V. Both still need calibrating for this project (task A1). |
 | **Front camera** | Intel RealSense D435. |
 | **Onboard computer** | MacBook (Apple silicon). It rides on the robot and runs everything except training. |
 | **Training computer** | Ubuntu PC with an NVIDIA RTX 5070. It's a shared lab machine: check it's free before training. |
 | **Everything else** | To be bought, printed or built. See [section 12](#12-parts-list). |
+| **Hour-6 re-plan** | The tray and lift are now a stretch goal, and the arm hands the object to the person. See [section 14.6](#146-re-plan-at-hour-6-0030-sat-no-lift-arm-hand-off). |
 
 Confirm the hardware list at kickoff, and update this table if anything differs.
 
@@ -74,15 +75,15 @@ flowchart LR
     A["Person asks:<br/>'I dropped my phone'"] --> B["Front camera<br/>finds the phone"]
     B --> C["Rover turns and creeps<br/>to the parking spot"]
     C --> D["Arm picks the phone<br/>off the floor"]
-    D --> E["Arm drops it in the tray<br/>(tray at its lowest)"]
-    E --> F["Tray rides up the mast<br/>to the person's hand"]
-    F --> G["Person takes it<br/>(load cell notices)"]
-    G --> H["Tray lowers;<br/>robot is ready again"]
+    D --> E["Arm lifts it to<br/>the present pose"]
+    E --> F["Arm holds it up<br/>to the person"]
+    F --> G["Person pulls it out<br/>(the claw notices)"]
+    G --> H["Arm lets go and<br/>returns to ready"]
 ```
 
 **Key design choices**
 
-- **The arm only works low.** The SO-101 picks from the floor and drops into a tray about 20 cm up. The tray, not the arm, carries the item to the person. This keeps the robot bottom-heavy and the lift light and fast.
+- **The arm picks low and presents at its highest comfortable reach.** The SO-101 picks from the floor, lifts the object to a fixed `present` pose and holds it for the person to pull out. The tray lift is a stretch goal for a higher hand-off. This keeps the robot bottom-heavy.
 - **The robot parks so the object is always in about the same place relative to the arm.** That makes a scripted grasp work, and lets the learned grasp (ACT) correct for small parking errors.
 - **Only two things are trained:** the phone detector (YOLO, front camera) and the grasp (ACT, wrist camera). Everything else is calibrated once or uses a ready-made model.
 - **A scripted grasp is always the fallback.** It is built first and kept working all event.
@@ -95,20 +96,20 @@ flowchart LR
 |---|---|---|---|
 | **SW1** | Software engineer 1 | Claude Code | Arm control and pick sequence, ACT grasp (recording, training, deployment), hand-height detection, request parser, status page |
 | **SW2** | Software engineer 2 | Codex | RealSense and phone detector, floor calibration, parking and search, ESP32 firmware, base driver, brain state machine |
-| **HW1** | Hardware builder 1 | — | Deck and drive train, power distribution and E-stop, electronics bay, final integration on the base |
-| **HW2** | Hardware builder 2 | — | Mast and tray lift, tray and load cell, camera mounts, fingertip pads, suction add-on if needed |
+| **HW1** | Darren (GitHub jason-shi-006) | — | Deck, drive train, power, E-stop, electronics bay, integration |
+| **HW2** | ClassicDQ | — | Front camera post, wrist camera mount, arm mount (with HW1), fingertip pads, suction if needed, and the tray lift (stretch) |
 
 ```mermaid
 flowchart TB
     SW1["SW1 + Claude Code<br/>arm, ACT grasp, hand height,<br/>request parser, status page"]
     SW2["SW2 + Codex<br/>RealSense + YOLO, floor map, parking,<br/>ESP32 firmware, base driver, brain"]
-    HW1["HW1<br/>deck, drive train, power, E-stop,<br/>electronics bay, integration"]
-    HW2["HW2<br/>mast, tray lift, load cell,<br/>camera mounts, fingertips, suction"]
+    HW1["HW1: Darren<br/>deck, drive train, power, E-stop,<br/>electronics bay, integration"]
+    HW2["HW2: ClassicDQ<br/>front camera post, wrist mount, arm mount,<br/>fingertips, suction, tray lift (stretch)"]
     SW1 <-->|"arm API, poses file"| SW2
     SW2 <-->|"serial protocol, motor wiring"| HW1
-    SW2 <-->|"lift and load cell firmware"| HW2
-    SW1 <-->|"mounts, fingertips, tray position"| HW2
-    HW1 <-->|"mast and arm on the deck"| HW2
+    SW2 <-->|"lift and load cell firmware (stretch)"| HW2
+    SW1 <-->|"mounts, fingertips"| HW2
+    HW1 <-->|"arm mount on the deck"| HW2
 ```
 
 Each arrow is a handoff that needs agreement. Changes to anything on an arrow go through a request on the board ([section 15](#15-agent-board-protocol)).
@@ -130,13 +131,13 @@ flowchart TB
         RS["RealSense D435<br/>front camera, 30-40 cm up"]
         WRIST["Wrist webcam"]
         SCENE["Deck webcam<br/>(optional, for ACT)"]
-        TOP["Mast-top webcam<br/>finds the hand"]
+        TOP["Mast-top webcam (stretch)<br/>finds the hand"]
         ARM["SO-101 follower arm<br/>bus servo board, 12 V"]
-        ESP["ESP32<br/>wheels, lift, load cell"]
+        ESP["ESP32<br/>wheels (stretch: lift, load cell)"]
         DRV["2 drive steppers<br/>TMC2209 drivers"]
-        LIFT["Lift stepper<br/>GT2 belt on the mast"]
-        LOAD["Load cell + HX711<br/>under the tray"]
-        LIM["Bottom limit switch"]
+        LIFT["Lift stepper (stretch)<br/>GT2 belt on the mast"]
+        LOAD["Load cell + HX711 (stretch)<br/>under the tray"]
+        LIM["Bottom limit switch (stretch)"]
         PWR["12 V 10 A supply<br/>E-stop and fuses"]
     end
     MAC -->|"USB 3, own port"| RS
@@ -169,8 +170,8 @@ block-beta
   columns 5
   WL["Drive wheel L"] CAM["Front camera post"] ARM["SO-101 arm"] space WR["Drive wheel R"]
   space ESP["ESP32 + drivers"] MAC["MacBook shelf"]:2 space
-  space HUB["USB hub + fuses"] TRAY["Tray, low position"] PWR["12 V in + E-stop"] space
-  CL["Caster L"] space MAST["Mast + lift stepper"] space CR["Caster R"]
+  space HUB["USB hub + fuses"] TRAY["Tray, low position (stretch)"] PWR["12 V in + E-stop"] space
+  CL["Caster L"] space MAST["Mast + lift stepper (stretch)"] space CR["Caster R"]
 ```
 
 | Item | Size or position | Why |
@@ -179,8 +180,8 @@ block-beta
 | Drive wheels | Two NEMA 17 steppers, axle about 5 cm from the front edge | Arm weight presses them into the floor; the robot pivots near the arm and front camera. |
 | Casters | **Two**, at the back corners, set 1–2 mm higher than the drive wheels | A wide base under the mast; the drive wheels always keep their grip. |
 | Arm | Front, centred, between or just behind the drive wheels | Its reach to the floor hangs out past the front as little as possible. |
-| Mast | Back, centred; tray on the arm's side of the mast | The arm can drop into the tray at its lowest position. |
-| Heavy parts | MacBook (and a battery, if used) low, between the axle and the casters | Balances the arm reaching forward. |
+| Mast and tray (stretch) | Back, centred; tray on the arm's side of the mast | Only if the tray lift is built: the arm can drop into the tray at its lowest position. |
+| Heavy parts | MacBook (and a battery, if used) low, between the axle and the casters | The MacBook stays on board and is the arm's counterweight, balancing the arm reaching forward. |
 | Turning | The back sweeps a circle about 76 cm across when pivoting | Turn slowly near people and furniture. |
 
 ### 6.2 Heights (side view, not to scale)
@@ -188,10 +189,11 @@ block-beta
 ```mermaid
 block-beta
   columns 3
-  space space TOPCAM["Mast-top camera, about 1.1 m"]
-  space space TRAYUP["Tray raised: 0.6-1.0 m"]
-  FRONTCAM["Front camera: 30-40 cm up, tilted 40 deg down"] space MAST["Mast (2020 extrusion)"]
-  ARM["Arm: works below about 30 cm"] space TRAYLOW["Tray low: about 20 cm"]
+  space space TOPCAM["Mast-top camera, about 1.1 m (stretch)"]
+  space space TRAYUP["Tray raised: 0.6-1.0 m (stretch)"]
+  PRESENT["Present pose: the arm's highest comfortable reach, about 40-50 cm (estimate, measure in A5)"]:2 space
+  FRONTCAM["Front camera: 30-40 cm up, tilted 40 deg down"] space MAST["Mast (2020 extrusion, stretch)"]
+  ARM["Arm: picks below about 30 cm"] space TRAYLOW["Tray low: about 20 cm (stretch)"]
   DECK["Deck: 8-12 cm off the floor"]:3
   FLOOR["Floor: the phone sits about 22 cm ahead of the front camera when parked"]:3
 ```
@@ -208,7 +210,9 @@ The RealSense's field of view is plenty: about 1.35–1.5 m of floor width at 1 
 
 These are geometry estimates; check them on the real mount. Mount the camera on a short post with its 1/4-20 tripod thread, 30–40 cm up, tilted about 40° down. Keep the arm's `ready` pose out of its view. **After ACT demos are recorded, no camera may move.**
 
-### 6.4 Tray lift
+### 6.4 Tray lift (stretch goal)
+
+This is a stretch goal. It is built only after G4, and only if everything else works.
 
 - **Mast:** 2020 V-slot extrusion, about 1 m (0.8 m if only seated users; decision D2).
 - **Drive:** NEMA 17 at the bottom, GT2 6 mm belt on a 20-tooth pulley (40 mm per motor turn), idler at the top, V-slot wheel carriage.
@@ -219,7 +223,7 @@ These are geometry estimates; check them on the real mount. Mount the camera on 
 
 ### 6.5 Gripper and phone
 
-- **The SO-101 claw is tested first (task A5, decision D1):** can it pick up a phone lying flat on the floor, face up and face down, with and without a case?
+- **The SO-101 claw is tested first (task A5, decision D1):** can it pick up a phone lying flat on the floor, face up and face down, with and without a case? It must also hold the phone at the present pose for 60 s and let it go when a person pulls.
 - If yes, add thin anti-slip fingertip pads (grip tape or printed TPU covers) and keep the claw.
 - If no, add a spring-mounted bellows suction cup beside the claw with a 12 V pump, a vent valve and a vacuum sensor ([section 12](#12-parts-list)). The phone pickup then becomes scripted: lower until the sensor reads sealed, then lift.
 - Keep anything mounted on the wrist light. Weigh the wrist camera together with its mount.
@@ -232,9 +236,9 @@ These are geometry estimates; check them on the real mount. Mount the camera on 
 flowchart LR
     SUP["12 V 10 A supply<br/>tethered for the demo"] --> ES["E-stop switch"] --> MF["Main fuse 15 A"] --> DB["Distribution block"]
     DB --> F1["Fuse 5 A"] --> ARMB["SO-101 follower<br/>bus servo board"]
-    DB --> F2["Fuse 5 A"] --> CAP["470-1000 uF capacitor"] --> TMC["3 x TMC2209<br/>2 wheels + lift"]
+    DB --> F2["Fuse 5 A"] --> CAP["470-1000 uF capacitor"] --> TMC["2 x TMC2209<br/>2 wheels<br/>(a third for the stretch lift)"]
     DB --> F3["Fuse 2 A"] --> PUMP["Pump + valve<br/>only if suction"]
-    DB --> F4["Fuse 1 A"] --> BUCK["Buck converter 12 V to 5 V"] --> ESPP["ESP32, HX711, LED"]
+    DB --> F4["Fuse 1 A"] --> BUCK["Buck converter 12 V to 5 V"] --> ESPP["ESP32, LED<br/>HX711 (stretch)"]
     LEAD["SO-101 leader: own 5 V supply,<br/>stays off the robot"]
 ```
 
@@ -244,15 +248,15 @@ flowchart LR
 |---|---|
 | SO-101 follower | About 3 A |
 | 2 drive steppers | About 0.5–1 A each |
-| Lift stepper (moving) | About 1 A |
+| Lift stepper (moving, stretch) | About 1 A |
 | Pump and valve (only if suction) | About 0.5 A |
 | ESP32 and sensors, via the buck converter | Small |
-| **Total** | **About 6–7 A peak.** Use a 10 A supply. |
+| **Total** | **About 5–6 A peak** without the lift (about 6–7 A with it). Use a 10 A supply. |
 
 **Wiring rules**
 
 - **Common ground:** every board's ground returns to one point. The ESP32's step signals only work if the drivers share its ground.
-- **E-stop:** it cuts the 12 V, which stops the arm, wheels and lift.
+- **E-stop:** it cuts the 12 V, which stops the arm and wheels, and the lift if the stretch lift is built.
 - **Brownouts:** put the 470–1000 µF capacitor across the stepper drivers' input, and keep power wires short and thick. If the arm's servos still reset when the wheels start, give the arm its own supply.
 - **Fuses:** one per branch, so one short doesn't take everything down.
 - **USB:** the RealSense gets its own USB 3 port on the Mac. Everything else goes through the powered hub.
@@ -293,7 +297,7 @@ The RealSense needs a different Python from LeRobot on macOS ([section 20](#20-t
 flowchart LR
     subgraph PERC["perception process (sudo)"]
         RSM["RealSense reader<br/>colour 1280x720 + depth"] --> YOLO["YOLO detector"] --> FLOORM["Floor mapping<br/>pixel to metres"]
-        TOPC["Mast-top webcam"] --> HAND["MediaPipe hand height"]
+        TOPC["Mast-top webcam<br/>(stretch)"] --> HAND["MediaPipe hand height<br/>(stretch)"]
     end
     subgraph MAIN["main process"]
         BRAIN["Brain state machine"]
@@ -303,7 +307,7 @@ flowchart LR
         REQ["Request parser<br/>keyword STOP + Claude API"]
     end
     FLOORM -->|"UDP JSON, port 5601"| BRAIN
-    HAND -->|"UDP JSON, port 5602"| BRAIN
+    HAND -->|"stretch: UDP JSON, port 5602"| BRAIN
     UI --> REQ --> BRAIN
     BRAIN <--> ARMM
     BRAIN <--> BASED
@@ -356,11 +360,12 @@ perception:
   hand_udp: 127.0.0.1:5602
   parking_spot_floor_m: [0.22, 0.0]        # measured in task P4
   parking_tolerance_m: 0.02
-lift:
+handoff: {timeout_s: 60}                   # seconds holding at the present pose before giving up
+lift:                                      # stretch: tray lift
   seated_hand_mm: 700
   standing_hand_mm: 1000
   taken_weight_drop_g: 50
-items: [phone, glasses, pill_bottle, remote, pen, sock]
+items: [phone]                             # stretch: glasses, pill_bottle, remote, pen, sock
 ```
 
 ### 9.2 Detection message (perception → brain, UDP port 5601, about 15 Hz)
@@ -384,13 +389,28 @@ An empty `items` list means nothing was seen. The brain treats a gap of more tha
 
 ### 9.4 Arm API (`arm/pick.py`)
 
+The main call is a hand-off: the arm picks the object, lifts it to the `present` pose, holds it and waits for the person to take it.
+
+```python
+result = pick_to_hand(arm, poses, pan_deg=0.0, roll_deg=0.0, policy=None, speed_deg_s=45,
+                      handoff_timeout_s=60, stop_event=None)
+# result == {"result": "taken" | "timeout" | "missed" | "dropped" | "stuck" | "stopped",
+#            "grasp": "scripted" | "policy", "attempts": 1, "seconds": 31.0, "detail": "..."}
+```
+
+- **"taken":** the person pulled it out; the claw opened and the arm is back at `ready`.
+- **"timeout":** nobody took it within the timeout; the arm is at `lift`, still holding.
+- **"dropped":** it slipped before the present pose was reached.
+
+**Stretch: tray mode.** `pick_to_tray` drops the object in the tray instead:
+
 ```python
 result = pick_to_tray(arm, poses, pan_deg=0.0, roll_deg=0.0, policy=None, speed_deg_s=45)
 # result == {"result": "in_tray" | "missed" | "dropped" | "stuck" | "stopped",
 #            "grasp": "scripted" | "policy", "attempts": 1, "seconds": 14.2, "detail": "..."}
 ```
 
-Command line: `python -m arm.pick run [--policy DIR] [--pan DEG] [--roll DEG] [--speed DEG_S] [--dry-run]`. The last printed line is `RESULT {json}`. Exit codes: 0 in_tray, 1 error or stopped, 2 missed, 3 dropped, 4 stuck.
+Command line: `python -m arm.pick run [--to hand|tray] [--policy DIR] [--pan DEG] [--roll DEG] [--speed DEG_S] [--dry-run]`. The default is `--to hand`. The last printed line is `RESULT {json}`. Exit codes: 0 taken or in_tray, 1 error or stopped, 2 missed, 3 dropped, 4 stuck, 5 timeout.
 
 ### 9.5 Serial protocol (Mac ↔ ESP32, USB, 115200 baud, one command per line)
 
@@ -398,16 +418,17 @@ Command line: `python -m arm.pick run [--policy DIR] [--pan DEG] [--roll DEG] [-
 |---|---|---|
 | `PING` | `PONG` | Link check |
 | `DRIVE <left_mm_s> <right_mm_s>` | (none) | Wheel speeds. **Watchdog: the wheels stop if no DRIVE arrives for 300 ms.** |
-| `STOP` | `OK STOP` | Wheels stop now |
-| `LIFT_HOME` | `LIFT_HOMED` | Lower until the bottom switch, zero the position |
-| `LIFT_TO <mm>` | `LIFT_AT <mm>` when it arrives | Move the tray to a height above the switch |
-| `TRAY` | `TRAY <grams>` | Read the load cell |
-| `TARE` | `OK TARE` | Zero the load cell (tray empty) |
+| `STOP` | `OK STOP` | Wheels stop now, and the lift too when it's fitted (agreed in REQ-codex-2) |
+| `LIFT_HOME` | `LIFT_HOMED` | Lower until the bottom switch, zero the position (stretch: lift) |
+| `LIFT_TO <mm>` | `LIFT_AT <mm>` when it arrives | Move the tray to a height above the switch (stretch: lift) |
+| `TRAY` | `TRAY <grams>` | Read the load cell (stretch: lift) |
+| `TARE` | `OK TARE` | Zero the load cell (tray empty) (stretch: lift) |
 
 - **Status:** the ESP32 also sends `STAT <left_steps> <right_steps> <lift_mm> <tray_g> <estop>` every 100 ms.
 - **Errors:** sent as `ERR <text>`.
+- **Without the lift:** firmware replies `ERR no lift` to `LIFT_HOME`, `LIFT_TO`, `TRAY` and `TARE`, and `STAT` reports `lift_mm` and `tray_g` as 0.
 - **Steps per mm, drive:** with a 72 mm wheel, 200 steps per turn and 8 microsteps, one step is about 0.14 mm.
-- **Steps per mm, lift:** 40 mm per turn at 1600 microsteps per turn is 0.025 mm per step.
+- **Steps per mm, lift (stretch):** 40 mm per turn at 1600 microsteps per turn is 0.025 mm per step.
 
 ### 9.6 Request parser (`ui/request.py`)
 
@@ -428,7 +449,7 @@ parse_request("stop!")               # -> {"action": "stop", "item": None}
 | `GET /` | The page: text box, big STOP button, current state, small camera thumbnails |
 | `POST /request` | `{"text": "..."}`: parsed, then sent to the brain |
 | `POST /stop` | Stop everything |
-| `GET /status` | Brain state, last detection, lift height, tray weight, last pick result |
+| `GET /status` | Brain state (state names include Present and WaitForTake), last detection, lift height and tray weight (`lift_mm` and `tray_g`, null without the lift), last pick result |
 
 ---
 
@@ -463,16 +484,23 @@ flowchart TD
     UP --> LF["lift: carry pose"]
     LF --> CK2{"still holding?"}
     CK2 -->|"no"| DROP["RESULT dropped"]
-    CK2 -->|"yes"| AB["above_tray"]
-    AB --> CK3{"still holding?"}
+    CK2 -->|"yes"| PR["present<br/>(move at most 25 deg/s near a person)"]
+    PR --> CK3{"still holding?"}
     CK3 -->|"no"| DROP
-    CK3 -->|"yes"| REL["open over the tray"]
-    REL --> BACK["lift, then ready"] --> OK["RESULT in_tray"]
+    CK3 -->|"yes"| WT["wait for take<br/>(claw squeezes, arm holds still)"]
+    WT --> TK{"claw closed fully<br/>within 60 s?"}
+    TK -->|"yes: taken"| REL["open the claw, back to ready"] --> OK["RESULT taken"]
+    TK -->|"no: 60 s passed"| HB["back to lift, still holding"] --> TO["RESULT timeout"]
+    CK2 -.->|"tray mode (stretch)"| AB["above_tray"]
+    AB --> CK4{"still holding?"}
+    CK4 -->|"no"| DROP
+    CK4 -->|"yes"| REL2["open over the tray"]
+    REL2 --> BACK["lift, then ready"] --> OK2["RESULT in_tray"]
 ```
 
 **Teaching (`teach`)**
 
-- The follower copies the leader. The person presses Enter at each pose: `ready`, `above_object`, `at_object`, `lift`, `above_tray`, then claw open and claw closed (empty).
+- The follower copies the leader. The person presses Enter at each pose: `ready`, `above_object`, `at_object`, `lift`, `present`, then claw open and claw closed (empty). `above_tray` is only needed for tray mode (stretch).
 - The poses are saved to `config/poses.json`, in degrees as LeRobot reports them.
 
 **Claw check**
@@ -484,6 +512,7 @@ flowchart TD
 
 - While carrying, command the claw a few units *past* closed. That keeps squeezing.
 - Send the closing target straight away at the start of every move. Never ramp it from the claw's current position: that loosens the grip at the start of every move and drops the object.
+- **Grip while presenting:** decided by the A5 pull test (full squeeze or a lighter hold) and recorded as D9.
 
 **Arrival checks**
 
@@ -500,8 +529,8 @@ flowchart TD
 
 **Done when**
 
-1. The dry-run tests pass: a clean pick, one miss, two misses (result `missed`) and a drop (result `dropped`).
-2. On the bench (mock deck, block or phone on a taped spot), 3 out of 3 slow runs end `in_tray`.
+1. The dry-run tests pass: a clean pick-and-present with a take (result `taken`), a timeout (result `timeout`), STOP while presenting (result `stopped`), a drop before presenting (result `dropped`), one miss and two misses (result `missed`).
+2. On the bench (mock deck, block or phone on a taped spot), 3 out of 3 slow runs of pick, present and take end `taken`.
 3. Then 3 out of 3 at normal speed.
 
 ### 10.2 Learned grasp: ACT (SW1)
@@ -525,7 +554,7 @@ flowchart TD
 - **`stop`:** stops training.
 - **Shared GPU:** first check that the GPU is free (`nvidia-smi`); never start over someone else's job.
 
-**Running it.** `pick_to_tray(..., policy=DIR)` loads the checkpoint onto the Mac's GPU (`mps`) and lets the policy drive from `ready`.
+**Running it.** `pick_to_hand(..., policy=DIR)` loads the checkpoint onto the Mac's GPU (`mps`) and lets the policy drive from `ready`.
 
 - **Grasp done:** when the policy asks for a closed claw and the claw has been stopped short for 8 frames in a row. The scripted lift then takes over.
 - **Time limit:** 20 s.
@@ -533,7 +562,7 @@ flowchart TD
 **Done when**
 
 1. A 5-demo rehearsal completes the whole loop (record, convert, train 200 steps on the PC, pull, run on the arm), before the real recording.
-2. With the real policy, 7 of 10 picks end `in_tray`, with the phone placed randomly inside the parking window.
+2. With the real policy, 7 of 10 picks end `taken` (the person pulls each time), with the phone placed randomly inside the parking window.
 
 ### 10.3 Front camera and phone detector (SW2)
 
@@ -587,30 +616,37 @@ flowchart TD
 
 **Firmware (`base/firmware/`)**
 
-- **Platform:** ESP32 with the FastAccelStepper library, three TMC2209 drivers, an HX711 and the bottom limit switch.
+- **Platform:** ESP32 with the FastAccelStepper library and two TMC2209 drivers for the wheels. The stretch lift adds a third driver, an HX711 and the bottom limit switch.
 - **Protocol:** implements 9.5 exactly.
 - **Watchdog:** the 300 ms wheel watchdog is mandatory.
-- **Acceleration:** limit wheel and lift acceleration so the mast doesn't rock.
-- **Lift holding:** keep the lift motor enabled while it's raised.
+- **Acceleration:** limit wheel acceleration, and lift acceleration if the lift is built, so the robot doesn't rock.
+- **Lift holding (stretch):** keep the lift motor enabled while it's raised.
 
 **Driver (`base/driver.py`).**
 
-- **Methods:** `drive(left, right)`, `stop()`, `lift_home()`, `lift_to(mm)`, `tray_grams()`, `tare()`, plus a status reader.
+- **Methods:** `drive(left, right)`, `stop()` and a status reader, plus `lift_home()`, `lift_to(mm)`, `tray_grams()` and `tare()` for the stretch lift.
 - **Fake mode:** a mode that runs without the ESP32 (a fake serial port that answers like the firmware), for tests.
 
 **Done when**
 
 1. On the bench, each command does what the table says.
 2. Unplugging the USB stops the wheels within 300 ms.
-3. `LIFT_HOME` then `LIFT_TO 700` lands within ±5 mm, 5 times in a row.
+3. (Stretch, with the lift.) `LIFT_HOME` then `LIFT_TO 700` lands within ±5 mm, 5 times in a row.
 
-### 10.6 Tray height and hand-off (SW1 for hand height, SW2 for firmware)
+### 10.6 Hand-off (SW1)
 
-- **v1 (build first):** preset heights from `robot.yaml` (seated 700 mm, standing 1000 mm), chosen on the status page.
-- **v2:** MediaPipe Hands on the mast-top webcam (`perception/hand.py`). Raise the tray until the person's open hand is level with it (tray at the hand's height in the image), within the presets as limits.
-- **Hand-off:** at height, wait until the tray weight drops by `taken_weight_drop_g` for 1 s (taken), or 60 s pass, then `LIFT_HOME`.
+- **v1 (build now):** the fixed, taught `present` pose, take detection by the claw, and a 60 s timeout (`handoff.timeout_s`). The arm lifts the object to `present` and holds it. When the person pulls the object out, the squeezing claw closes fully, which the claw check (10.1) already detects. That counts as taken: the arm opens the claw and returns to `ready`. If nothing is taken in 60 s, the arm goes back to the `lift` (carry) pose, still holding, and reports a timeout.
+- **v2 (stretch):** MediaPipe hand height (`perception/hand.py`, mast-top webcam) picks between two taught present poses, low and high.
 
-**Done when** v1 raises, detects a take and lowers 5 times in a row. v2 stops within 10 cm of a seated person's hand.
+**Done when** v1 passes the hand-off checks in 10.1 (dry-run tests, then 3 of 3 on the bench). v2 picks the low pose for a seated person and the high pose for a standing one.
+
+**Stretch: tray lift** (SW1 for hand height, SW2 for firmware)
+
+- **Tray v1 (build first):** preset heights from `robot.yaml` (seated 700 mm, standing 1000 mm), chosen on the status page.
+- **Tray v2:** MediaPipe Hands on the mast-top webcam (`perception/hand.py`). Raise the tray until the person's open hand is level with it (tray at the hand's height in the image), within the presets as limits.
+- **Tray hand-off:** at height, wait until the tray weight drops by `taken_weight_drop_g` for 1 s (taken), or 60 s pass, then `LIFT_HOME`.
+
+**Done when** tray v1 raises, detects a take and lowers 5 times in a row. Tray v2 stops within 10 cm of a seated person's hand.
 
 ### 10.7 Brain (SW2)
 
@@ -622,13 +658,12 @@ stateDiagram-v2
     Search --> Failed: two full turns, nothing seen
     Approach --> Search: item lost for more than 1 s
     Approach --> Pick: parked within tolerance
-    Pick --> Raise: in_tray
+    Pick --> Present: object held, in pick_to_hand
     Pick --> Search: dropped (back on the floor)
     Pick --> Failed: missed twice, or stuck
-    Raise --> WaitForTake: tray at hand height
-    WaitForTake --> Lower: weight drops (taken)
-    WaitForTake --> Lower: 60 s timeout
-    Lower --> Idle: tray homed
+    Present --> WaitForTake: at the present pose
+    WaitForTake --> Idle: taken (claw closed fully)
+    WaitForTake --> Failed: 60 s timeout, not taken (the arm holds at carry)
     Failed --> Idle: reported on the page
     note right of Idle
         STOP (page button or the word "stop")
@@ -640,11 +675,12 @@ stateDiagram-v2
 - **Loop and logging:** the brain runs a 10 Hz loop and logs every state change and message to `data/logs/<date>.jsonl`.
 - **Attempt limit:** at most 3 full attempts per request (search to pick), then it reports `Failed`.
 - **Simulated components:** it accepts the simulated arm, the fake serial port and replayed detection logs, so the whole mission can run without hardware.
+- **Known limit:** if the object slips while presenting, it looks the same as "taken".
 
 **Done when**
 
 1. The full mission passes in simulation.
-2. On the real robot, 5 of 5 runs go from request to tray raised, with the phone placed within 1 m in front.
+2. On the real robot, 5 of 5 runs go from request to the phone presented and taken, with the phone placed within 1 m in front.
 
 ### 10.8 Request parser and status page (SW1)
 
@@ -660,7 +696,7 @@ These follow the interfaces in 9.6 and 9.7.
 
 ## 11. Task list
 
-IDs are referenced on the board. **Depends on** must be done first. Gate tasks (G) are team checkpoints ([section 14](#14-timeline)).
+IDs are referenced on the board. **Depends on** must be done first. Gate tasks (G) are team checkpoints ([section 14](#14-timeline)). HW1 is Darren and HW2 is ClassicDQ.
 
 | ID | Task | Owner | Depends on | Done when |
 |---|---|---|---|---|
@@ -674,8 +710,9 @@ IDs are referenced on the board. **Depends on** must be done first. Gate tasks (
 | A2 | `arm/pick.py` + `arm/sim.py` + tests | SW1 | S1 | Dry-run tests pass (10.1) |
 | A3 | `arm/teach.py` → `config/poses.json` | SW1 | A1, A2 | Poses saved and reloaded |
 | A4 | Bench scripted pick: slow, then normal speed | SW1 | A3 | 3/3 at each speed |
-| A5 | Phone grasp test with the claw (flat, face up and down, in a case) | SW1 + HW2 | A4 | Decision D1 posted |
+| A5 | Phone grasp test with the claw (flat, face up and down, in a case) | SW1 + HW2 | A4 | Decision D1 posted; the claw holds the phone at the present pose for 60 s and lets go to a pull |
 | A6 | Re-teach poses with the arm on the real base | SW1 | G2 | 3/3 scripted picks from the parking spot |
+| A7 | Hand-off: present pose, take detection, timeout (`pick_to_hand`, teach adds `present`) | SW1 | A2, A3 | The 10.1 dry-run hand-off tests pass and the bench pick-present-take is 3/3 |
 | T1 | Recording setup with `lerobot-record` (camera names fixed) | SW1 | A1, C2 | 5 rehearsal demos recorded |
 | T2 | `training/remote.sh`: setup / run / status / pull / stop | SW1 | S5 | 200-step run trains and pulls back |
 | T3 | Policy grasp mode in `arm/pick.py` | SW1 | A2, T2 | Rehearsal checkpoint runs on the arm |
@@ -693,20 +730,20 @@ IDs are referenced on the board. **Depends on** must be done first. Gate tasks (
 | B4 | `base/driver.py` + fake serial + tests | SW2 | S6 | Tests pass without the ESP32 |
 | B5 | Parking controller on the real base | SW2 | B3, B4, P4 | ±2–3 cm, 8/10 |
 | B6 | Search behaviour | SW2 | B5 | Finds the phone from any heading within 1.5 m |
-| L1 | Mast, carriage, belt, limit switch, tray, load cell built | HW2 | — | Tray moves smoothly by hand |
-| L2 | Lift and load cell firmware (`LIFT_*`, `TRAY`, `TARE`) | SW2 | L1, B3 | ±5 mm, 5/5 |
-| L3 | Hand height: v1 presets, then v2 MediaPipe | SW1 | L2, C3 | 10.6 checks pass |
+| L1 | Mast, carriage, belt, limit switch, tray, load cell built | HW2 (stretch) | — | Tray moves smoothly by hand |
+| L2 | Lift and load cell firmware (`LIFT_*`, `TRAY`, `TARE`) | SW2 (stretch) | L1, B3 | ±5 mm, 5/5 |
+| L3 | Hand height: v1 presets, then v2 MediaPipe | SW1 (stretch) | L2, C3 | 10.6 checks pass |
 | C1 | Front camera post: 30–40 cm, about 40° down | HW2 | B1 | Grab spot visible in the RealSense picture |
 | C2 | Wrist camera mount (weighed) | HW2 | — | Mounted, under the weight limit |
-| C3 | Mast-top camera mount | HW2 | L1 | Sees a seated hand at every tray height |
+| C3 | Mast-top camera mount | HW2 (stretch) | L1 | Sees a seated hand at every tray height |
 | C4 | Fingertip pads | HW2 | A5 | Pen and phone tests pass |
-| C5 | Suction add-on (**only if D1 = no**) | HW2 + SW1 | A5 | Seals on 5 phones in cases |
+| C5 | Suction add-on (**only if D1 = no**) | HW2 + SW1 (stretch) | A5 | Seals on 5 phones in cases |
 | M1 | Brain state machine with simulated parts | SW2 | A2, B4, P3 | Simulated mission passes |
 | M2 | End-to-end on the real robot | SW2 + SW1 | M1, G2 | 5/5 (10.7) |
 | U1 | Request parser (9.6) | SW1 | S6 | 20/20 phrases; stop works offline |
 | U2 | Status page + STOP (9.7) | SW1 | U1, M1 | STOP within 0.5 s |
-| G1 | **Bench gate** | All | A4, P3, B3, L1 | Hour 10 |
-| G2 | **On-the-base gate**: arm, cameras, mast on the deck, final mounts | All | B2, C1, C2, L1 | Hour 12 |
+| G1 | **Bench gate** | All | A4, A7, P3, B3 | Hour 6 (00:30 Sat): the scripted pick-and-present is 3/3 on the bench, YOLO v1 detects the phone, and the wheels turn on serial commands |
+| G2 | **On-the-base gate**: arm, front camera and wrist camera on their final mounts, and the base drives on serial | All | B2, B3, C1, C2 | Hour 14.5 (09:00 Sat, assuming an 18:30 Fri kickoff) |
 | G3 | **First end-to-end run** | All | M1, G2; first successful M2 run | Hour 27 |
 | G4 | **Grasp decided; 5/5 end-to-end** | All | M2; T5 if pursuing ACT, otherwise explicit scripted decision | Hour 29 |
 | G5 | **Feature freeze**: only fixes after this | All | G4 | Hour 30 |
@@ -715,7 +752,7 @@ IDs are referenced on the board. **Depends on** must be done first. Gate tasks (
 
 ## 12. Parts list
 
-**Status:** **Have** = on hand · **Decided** = buy or make this · **Open** = depends on a decision in [section 13](#13-open-decisions) · **Confirm** = check at kickoff.
+**Status:** **Have** = on hand · **Decided** = buy or make this · **Open** = depends on a decision in [section 13](#13-open-decisions) · **Confirm** = check at kickoff · **Stretch** = build only if everything else works.
 
 **Arm and grasp**
 
@@ -739,7 +776,7 @@ IDs are referenced on the board. **Depends on** must be done first. Gate tasks (
 | Wrist camera | 1 | Small USB camera, about 640×480, light | Open (D3) |
 | Wrist camera mount + diffused 5 V LED | 1 | Printed | Decided |
 | Deck webcam for ACT | 1 | C920-class | Open (D4) |
-| Mast-top webcam | 1 | Must see a hand at every tray height | Open (D5) |
+| Mast-top webcam | 1 | Must see a hand at every tray height | Stretch (D5) |
 | ArUco markers | A few | Printed, 10 cm | Decided |
 
 **Drive base**
@@ -757,23 +794,23 @@ IDs are referenced on the board. **Depends on** must be done first. Gate tasks (
 
 | Part | Qty | Spec | Status |
 |---|---|---|---|
-| 2020 V-slot extrusion | 1 | About 1 m | Decided (length Open, D2) |
-| Carriage | 1 | V-slot plate + 3–4 wheels (MGN rail if it shakes) | Decided |
-| GT2 6 mm belt | ~2.1 m | Twice the mast plus 10–20 cm | Decided |
-| GT2 20-tooth pulley (5 mm bore) + idler + 2 belt clamps | 1 set | | Decided |
-| NEMA 17 + mount + TMC2209 (lift) | 1 | | Decided |
-| Limit switches | 1–2 | Bottom (homing), optional top | Decided |
-| Tray + carriage bracket | 1 | Printed | Decided |
-| 1 kg load cell + HX711 | 1 | Under the tray | Decided |
-| Mast bracing (gussets) | A few | If it wobbles | Open |
-| Cable chain or spiral wrap | 1 | Wires up the mast | Decided |
-| T-nuts, M5 screws | Assortment | | Decided |
+| 2020 V-slot extrusion | 1 | About 1 m | Stretch (length Open, D2) |
+| Carriage | 1 | V-slot plate + 3–4 wheels (MGN rail if it shakes) | Stretch |
+| GT2 6 mm belt | ~2.1 m | Twice the mast plus 10–20 cm | Stretch |
+| GT2 20-tooth pulley (5 mm bore) + idler + 2 belt clamps | 1 set | | Stretch |
+| NEMA 17 + mount + TMC2209 (lift) | 1 | | Stretch |
+| Limit switches | 1–2 | Bottom (homing), optional top | Stretch |
+| Tray + carriage bracket | 1 | Printed | Stretch |
+| 1 kg load cell + HX711 | 1 | Under the tray | Stretch |
+| Mast bracing (gussets) | A few | If it wobbles | Stretch |
+| Cable chain or spiral wrap | 1 | Wires up the mast | Stretch |
+| T-nuts, M5 screws | Assortment | | Stretch |
 
 **Electronics and power**
 
 | Part | Qty | Spec | Status |
 |---|---|---|---|
-| ESP32 dev board | 1 | Runs wheels, lift, load cell | Decided |
+| ESP32 dev board | 1 | Runs wheels (and the stretch lift and load cell) | Decided |
 | 12 V supply | 1 | **10 A**, tethered | Decided |
 | E-stop mushroom switch | 1 | Rated ≥ 15 A, cuts the 12 V | Decided |
 | Main fuse 15 A + branch fuses (5, 5, 2, 1 A) + fuse block | 1 set | | Decided |
@@ -808,21 +845,22 @@ flowchart LR
     D1 -->|"no"| SUC["Suction kit + cup mount (C5)"]
     D3{"D3: wrist camera model"} --> WM["Wrist mount design (C2)"]
     D4{"D4: deck webcam for ACT?"} --> REC["Recording setup (T1)"]
-    D2{"D2: mast length"} --> ORDER["Extrusion and belt length"]
-    D5{"D5: mast-top camera"} --> HANDV2["Hand height v2 (L3)"]
+    D2{"D2: mast length (stretch)"} --> ORDER["Extrusion and belt length"]
+    D5{"D5: mast-top camera (stretch)"} --> HANDV2["Hand height v2 (L3)"]
     SUC --> PWRB["Pump branch in the power plan"]
 ```
 
 | # | Decision | Options | Owner | How to decide |
 |---|---|---|---|---|
-| D1 | Phone pickup | Claw with pads, or suction | SW1 + HW2 | Task A5: 10 tries each, phone face up and down, with and without a case. 8/10 with the claw → claw. |
-| D2 | Mast length | ~0.8 m (seated) or ~1.2 m (standing too) | HW2 | Measure the demo chair's hand height. |
+| D1 | Phone pickup | Claw with pads, or suction | SW1 + HW2 | Task A5: 10 tries each, phone face up and down, with and without a case. 8/10 with the claw → claw. The claw must also hold the phone at the present pose for 60 s. |
+| D2 | Mast length (stretch) | ~0.8 m (seated) or ~1.2 m (standing too) | HW2 | Measure the demo chair's hand height. |
 | D3 | Wrist camera | Tiny module or small webcam | SW1 + HW2 | Weigh it with its mount; check its view of the claw. |
 | D4 | Second ACT camera | Wrist only, or wrist + deck | SW1 | Rehearsal (T1): does the wrist view lose the phone close up? |
-| D5 | Mast-top camera | Normal or wide angle | SW1 + HW2 | Sit in the demo chair; check the hand stays in view at all tray heights. |
+| D5 | Mast-top camera (stretch) | Normal or wide angle | SW1 + HW2 | Sit in the demo chair; check the hand stays in view at all tray heights. |
 | D6 | Deck material | Plywood, acrylic, 2020 frame | HW1 | What's available and quickest to cut. |
 | D7 | Power source | Tether or battery | HW1 | Tether for the event; battery only if everything else is done. |
 | D8 | Training backup | PC only, or PC + cloud GPU | SW1 | If the PC is busy at the event, book cloud time. |
+| D9 | Grip while presenting | Full squeeze or light hold | SW1 | A5 pull test: can a seated person pull the phone out easily, and does it stay put for 60 s? |
 
 ---
 
@@ -1033,6 +1071,25 @@ another dependency chain after stable parking; it must not hold up the scripted
 baseline. Before anyone sleeps, identify which path is blocked and which awake
 person can actually advance it.
 
+### 14.6 Re-plan at hour 6 (00:30 Sat): no lift, arm hand-off
+
+At hour 6, SW1 decided that the tray and lift are a stretch goal and that the arm hands the object to the person (10.1, 10.6). The base with the arm mounted is due at hour 14.5 (09:00 Sat). Times are written as "hour N (HH:MM Day)". The clock times assume an 18:30 Fri kickoff, which is hour 0. This table overrides the earlier tables in this section where they disagree.
+
+| Time | SW1 + Claude | SW2 + Codex | HW1 (Darren) | HW2 (ClassicDQ) |
+|---|---|---|---|---|
+| 00:30–01:30 (h6–7) | Merge PRs; mock deck; A5 claw test (flat phone, face up and down, cases, present-pose hold, pull test) → D1, D9 | P2 photos: RealSense on a temporary 35 cm, 40° mount; 150–300 new phone images plus about 50 empty-floor images plus look-alike negatives (remote, wallet, glasses) | B1 drive motors, wheels, casters | C1 front camera post (final) |
+| 01:30–03:30 (h7–9) | A3 teach (with `present`), A4 pick-present-take 3/3 slow then normal; T1/T2 rehearsal (5 throwaway demos, 200-step run) if the PC is reachable. Claude builds A7. | Label and check (REQ-claude-4), P3 YOLO v1 on the PC; B3 wheels-only firmware and B4 driver with Darren | B2 power, E-stop, fuses (no lift branch); B3 wiring with SW2 | C2 wrist camera mount (weighed); arm mount plate with HW1 |
+| 03:30–08:30 (h9–14) | Sleep | Per 14.4 | Per 14.4 | Per 14.4 |
+| 08:30–09:00 | Check the arm and wrist camera on the base | Base drives on serial | Arm, camera post onto the base | Mounts finished |
+| 09:00 (h14.5) | **G2** | | | |
+| 09:00–09:45 | A6 re-teach on the base (with `present`) | P4 floor homography and parking spot on the final mount | Traction, wiring fixes | C4 fingertip pads (after D1) |
+| 09:45–11:30 | T4: 50 demos (SW2 parks) | Park for demos, measure precision | Support | Lift (stretch) only if nothing else is open |
+| 11:30–15:30 (h17–21) | Convert, start 20k-step training (T5); A7 and U2 with the brain; scripted end-to-end | M1 brain (new states), B5 parking, B6 search | Reliability fixes | Support |
+| 15:30 (h21) | **G3** first end-to-end: request → phone presented → taken (scripted grasp) | | | |
+| 15:30–22:30 (h21–28) | T5 test checkpoints; T6 round 2 if needed; end-to-end runs | P5 venue top-up; robustness | Spares | Lift (stretch) |
+| 22:30 (h28) | **G4** grasp decided, 5/5 end-to-end | | | |
+| 00:30 Sun (h30) | **G5** freeze, backup video | | | |
+
 ---
 
 ## 15. Agent board protocol
@@ -1093,9 +1150,9 @@ Requests for you:
 
 ## 16. Rules for agents
 
-1. **There is no existing code.** Build what section 11 lists; don't search for prior implementations or assume files exist until a task has created them.
+1. **Code exists for many tasks.** Before building, check `main`, the open PRs and the task branches, and don't rebuild something that exists. Build what section 11 lists only where nothing exists yet.
 2. **Stay in your area.** Edit only the folders your tasks own (section 8.1). Changing a section 9 interface needs a board request and approval from the other owner's person.
-3. **No hardware motion without your person.** Arms, wheels and lift move only after your person confirms the area is clear. Start every new motion slowly (arm 25°/s, wheels ≤ 100 mm/s, lift at half speed).
+3. **No hardware motion without your person.** Arms, wheels and the stretch lift move only after your person confirms the area is clear. Start every new motion slowly (arm 25°/s, wheels ≤ 100 mm/s, lift at half speed).
 4. **Simulation first.** Every module has a no-hardware mode with tests in `tests/`. Make the tests pass before touching hardware.
 5. **Never type passwords, and never run `sudo` on your own.** For the RealSense, give your person the exact command to run in their terminal.
 6. **Interactive prompts belong to your person.** When a command waits for Enter (calibration, teaching, recording), tell your person exactly what to do physically and which terminal to press Enter in.
@@ -1111,13 +1168,14 @@ Requests for you:
 
 ## 17. Safety
 
-- **Physical E-stop** on the robot cuts the 12 V: arm, wheels, lift. Everyone knows where it is.
-- **Software STOP:** the page's button and the word "stop" stop the wheels, hold the arm and hold the lift within 0.5 s.
+- **Physical E-stop** on the robot cuts the 12 V: arm, wheels, and the lift if it's built. Everyone knows where it is.
+- **Software STOP:** the page's button and the word "stop" stop the wheels and hold the arm (and the lift, if built) within 0.5 s.
 - **Wheel watchdog:** with no command for 300 ms, the wheels stop.
-- **Speed limits** live in `robot.yaml`: arm 45°/s (25°/s for first runs), wheels 200 mm/s max and slower near people, lift accelerations kept gentle.
-- **Lower the tray before driving.** A raised tray makes the robot top-heavy.
+- **Speed limits** live in `robot.yaml`: arm 45°/s (25°/s for first runs), wheels 200 mm/s max and slower near people, lift accelerations (stretch lift) kept gentle.
+- **Stretch lift: lower the tray before driving.** A raised tray makes the robot top-heavy.
 - **Arm at the end of a run:** it holds its pose when a script ends. When teleop or a LeRobot process stops, the follower goes limp, so rest it first or hold it.
-- **Hands clear** of the arm and the tray carriage during runs; the person taking the item reaches only for the raised tray.
+- **Hands clear** of the arm (and the tray carriage, if the stretch lift is built) during runs.
+- **The arm presents near a person.** The move to `present` runs at most 25°/s, and the person reaches only once the arm has stopped. The arm doesn't move while waiting, except to let go after a take. STOP and the E-stop work throughout.
 - **Batteries** (if used): fused, never left charging unattended.
 
 ---
@@ -1127,10 +1185,13 @@ Requests for you:
 | Risk | Likelihood | Impact | Mitigation / fallback |
 |---|---|---|---|
 | The claw can't lift a flat phone | Medium | High | Test it in hour 6 (A5). Suction add-on (C5); thinner fingertips; demo with a phone in a thicker case |
+| The claw can't hold the phone up or let go to a pull | Medium | High | Test it in A5; fingertip pads; a lighter hold (D9); suction (C5, stretch) |
+| The phone slips while presenting and counts as taken | Medium | Medium | Firm grip and pads; the person catches it |
+| The present height is too low for a seated person | Medium | Medium | The robot parks close to the chair; the tray lift (stretch) |
 | RealSense flakiness on macOS (sudo, first-access failures) | Medium | Medium | Retries in P1; keep a USB webcam as a backup front camera |
 | ACT isn't reliable in time | Medium | Medium | The scripted grasp is the demo; ACT only replaces it if it beats it on 10 picks |
 | Parking too imprecise for the grasp | Medium | High | Slow final approach; widen the ACT demo spread; small `--pan` correction from the detection |
-| Mast wobbles while driving | Medium | Medium | Gussets; lower the tray before driving; gentler acceleration |
+| The stretch mast wobbles while driving | Medium | Medium | Gussets; lower the tray before driving; gentler acceleration |
 | Servos reset when the steppers start (brownout) | Low | High | Capacitor, short thick wires; separate supply for the arm |
 | The Mac struggles (depth alignment + YOLO + ACT + 3 cameras) | Medium | Medium | Turn off alignment; run YOLO slower; ACT only runs during the grasp |
 | The venue floor confuses the detector | Medium | Medium | P5 top-up with venue photos |
@@ -1147,9 +1208,9 @@ Target: under 60 seconds from request to hand-off.
 1. A person sits in the demo chair; a phone lies on the floor about 1 m in front of the robot.
 2. They type or say: "I dropped my phone."
 3. The page shows "Looking for: phone". The robot turns, spots the phone and creeps up to it.
-4. The arm reaches down, picks the phone up and drops it in the tray.
-5. The tray rises up the mast to the person's hand.
-6. They take the phone; the tray senses it and lowers. The page shows "Done".
+4. The arm reaches down, picks the phone up and raises it to the person.
+5. They take the phone from the claw.
+6. The arm returns to ready and the page shows "Done".
 7. Show the STOP button and the E-stop once, briefly.
 
 A backup video of a successful run is recorded at hour 30, in case of hardware trouble during judging.
@@ -1203,6 +1264,7 @@ A backup video of a successful run is recorded at hour 30, in case of hardware t
 | **YOLO** | Fast object detector; here a nano model fine-tuned to find the phone in the front camera picture. |
 | **ArUco marker** | Printed square pattern OpenCV can locate precisely; used to map image pixels to floor positions (a **homography**). |
 | **Parking spot** | Where the phone must sit, relative to the robot, for the arm's grab pose to reach it. |
+| **Present pose** | The taught arm pose that holds the object up to the person. |
 | **TMC2209** | Quiet stepper motor driver board. |
 | **HX711** | Amplifier board that reads the load cell. |
 | **E-stop** | Big red emergency-stop switch that cuts power to the motors. |
