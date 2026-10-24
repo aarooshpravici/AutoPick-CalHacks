@@ -1,6 +1,6 @@
 # Instructions for Codex
 
-You are **codex**, the agent for **SW2** (@SW2-GITHUB-HANDLE — SW2: replace this with your GitHub username).
+You are **codex**, the agent for **SW2** (@romoj311-hub).
 
 Read `plan.md` before doing anything. Your tasks are the ones tagged SW2 in section 11. Follow section 15 (team board) and section 16 (rules for agents). No code exists yet: build each piece as the task list describes.
 
