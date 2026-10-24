@@ -41,7 +41,11 @@ Keys, typed in the recording terminal and followed by Enter:
            progress is not (press Enter first to keep it).
   Ctrl-C   stops now: no command goes out after the current frame and the follower holds where
            it is, torque on. Saved demos are kept; the demo in progress, or one still in its
-           reset, is discarded. A second Ctrl-C interrupts at once, even a save.
+           reset, is discarded (q is the key that saves the waiting demo and stops). A second
+           Ctrl-C interrupts at once, except while a demo is being saved or discarded or the
+           dataset finalized: those always finish, so the files never disagree with
+           meta/info.json. If a save fails by itself (an encoder error, a full disk), the
+           dataset is marked broken (RECORDING_BROKEN.txt) and --resume refuses it.
 
 A demo is saved when its reset ends (--reset-time seconds, in which teleop goes on but nothing
 is recorded), so that r can still discard it; there is a reset after the last demo too. With
@@ -73,6 +77,7 @@ python -m training.convert --src data/datasets/NAME --dst data/datasets/NAME_320
 from __future__ import annotations
 
 import argparse
+import contextlib
 import copy
 import itertools
 import math
@@ -83,6 +88,7 @@ import signal
 import sys
 import tempfile
 import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -124,6 +130,28 @@ Recording {episodes} demos into {root}{resume}
 
 class RecordError(RuntimeError):
     pass
+
+
+class DatasetMismatch(ValueError):
+    """--resume of a dataset recorded with other cameras, sizes, fps or robot."""
+
+
+BROKEN_MARKER = "RECORDING_BROKEN.txt"      # left in a dataset whose save or finalize failed part-way
+
+
+def mark_broken(root: Path, why: str) -> None:
+    """Leave BROKEN_MARKER in the dataset folder: its files may no longer match meta/info.json,
+    so --resume refuses it. Never raises (the disk may be full: then at least an empty file)."""
+    text = (f"{time.strftime('%Y-%m-%d %H:%M:%S')}: {why}\n"
+            f"The files here may not match meta/info.json. training/record.py --resume refuses this "
+            f"dataset: record the remaining demos into a new --name.\n")
+    try:
+        (root / BROKEN_MARKER).write_text(text)
+    except Exception:  # noqa: BLE001
+        try:
+            (root / BROKEN_MARKER).touch()
+        except Exception:  # noqa: BLE001
+            print(f"warning: couldn't mark {root} broken ({why}); don't --resume it", file=sys.stderr, flush=True)
 
 
 def say(message: str) -> None:
@@ -258,7 +286,7 @@ def dataset_features(rec) -> tuple[str, dict]:
 def open_dataset(rec, robot_type: str, features: dict, resume: bool):
     """A new LeRobotDataset at rec.dataset.root, or with resume the existing one, opened with the
     arguments lerobot-record passes. A resumed dataset must have this recording's robot type,
-    fps and features (same cameras and sizes); otherwise ValueError, and it is left as it was."""
+    fps and features (same cameras and sizes); otherwise DatasetMismatch, and it is left as it was."""
     from lerobot.datasets import LeRobotDataset
 
     d = rec.dataset
@@ -275,9 +303,9 @@ def open_dataset(rec, robot_type: str, features: dict, resume: bool):
         try:
             sanity_check_dataset_robot_compatibility(dataset, SimpleNamespace(robot_type=robot_type), d.fps,
                                                      features)
-        except ValueError:
-            dataset.finalize()
-            raise
+        except ValueError as e:
+            dataset.finalize()                  # writes nothing: no episode was added
+            raise DatasetMismatch(str(e)) from None
         return dataset
     d.stamp_repo_id()
     return LeRobotDataset.create(
@@ -326,19 +354,40 @@ def read_key(timeout_s: float) -> str | None:
 class Stop:
     """Ctrl-C while recording. The first press only sets the flag, which the loop checks before
     each command, so it stops between two commands, never half-way through one. A second
-    press raises KeyboardInterrupt at once (a stuck loop, or to abandon a save). Prints
-    nothing itself: printing from a signal handler can break the terminal's output."""
+    press raises KeyboardInterrupt at once (a stuck loop), except inside protected() (saving
+    a demo, discarding one, finalizing the dataset): there every press only counts, because
+    an interrupted write leaves the files disagreeing with meta/info.json. The handler
+    prints nothing (printing from a signal handler can break the terminal's output); the
+    loop acknowledges the press as soon as it sees it (acknowledge())."""
 
     def __init__(self):
         self.presses = 0
+        self.depth = 0              # > 0 inside a protected section
+        self.acknowledged = False
 
     def is_set(self) -> bool:
         return self.presses > 0
 
     def press(self, *_) -> None:
         self.presses += 1
-        if self.presses > 1:
+        if self.presses > 1 and self.depth == 0:
             raise KeyboardInterrupt
+
+    @contextlib.contextmanager
+    def protected(self):
+        self.depth += 1
+        try:
+            yield
+        finally:
+            self.depth -= 1
+
+    def acknowledge(self, log) -> None:
+        """Say once that Ctrl-C was seen (from the loop, never from the handler)."""
+        if not self.acknowledged:
+            self.acknowledged = True
+            log("\nCtrl-C: stopping. No more commands; the follower holds where it is, torque on. "
+                "Keeping the saved demos ...")
+
 
 
 def catch_ctrl_c(stop: Stop):
@@ -386,7 +435,7 @@ class Recorder:
         self.episode_time_s, self.reset_time_s = episode_time_s, reset_time_s
         self.frozen = tuple(frozen)
         self.keys = keys or read_key
-        self.stop = stop
+        self.stop = stop or Stop()
         self.log = log or say
         self.clock = getattr(follower, "clock", None) or RealClock()
         self.cmd = None
@@ -396,7 +445,8 @@ class Recorder:
     # --- one frame -------------------------------------------------------------------
 
     def _check_stop(self) -> None:
-        if self.stop is not None and self.stop.is_set():
+        if self.stop.is_set():
+            self.stop.acknowledge(self.log)
             raise KeyboardInterrupt
 
     def _joints(self, reading: dict) -> dict:
@@ -446,10 +496,27 @@ class Recorder:
     # --- demos ---------------------------------------------------------------------------
 
     def _discard(self, why: str) -> None:
-        if self.dataset.has_pending_frames():
-            self.dataset.clear_episode_buffer()
+        with self.stop.protected():             # half-deleted frames would end up in the next demo
+            if self.dataset.has_pending_frames():
+                self.dataset.clear_episode_buffer()
         self.frames = 0
         self.log(why)
+
+    def _save(self, number: int) -> None:
+        """Save the demo in the buffer. Ctrl-C can't interrupt it. If the save itself fails, the
+        dataset is marked broken (mark_broken) before the error goes on."""
+        self.log(f"saving demo {number} ... (Ctrl-C now stops once it is saved)")
+        try:
+            with self.stop.protected():
+                # One camera after another: parallel encoding crashed once with two cameras
+                # (training/rehearse_sim.py). The files are the same either way.
+                self.dataset.save_episode(parallel_encoding=False)
+        except BaseException as e:
+            mark_broken(Path(self.dataset.root), f"saving demo {number} failed: {type(e).__name__}: {e}")
+            raise
+        self.saved += 1
+        self.frames = 0
+        self.log(f"demo {number} saved ({self.dataset.num_episodes} in the dataset)")
 
     def _demo(self, number: int) -> str:
         self.log(f"\ndemo {number}/{self.episodes}: RECORDING ({self.episode_time_s:g} s at most). "
@@ -518,12 +585,7 @@ class Recorder:
             after = self._reset(number)
             if self.frames > 0:
                 self._check_stop()                              # Ctrl-C in the reset: not saved
-                # One camera after another: parallel encoding crashed once with two cameras
-                # (training/rehearse_sim.py). The files are the same either way.
-                self.dataset.save_episode(parallel_encoding=False)
-                self.saved += 1
-                self.frames = 0
-                self.log(f"demo {number} saved ({self.dataset.num_episodes} in the dataset)")
+                self._save(number)
             if after == "q":
                 self.log("q: stopping")
                 return self.saved
@@ -548,11 +610,19 @@ def record_live(rec, arm_cfg: dict, max_step: float, resume: bool, log=None) -> 
     log = log or say
     root = Path(rec.dataset.root)
     robot_type, features = dataset_features(rec)
+    created = not resume and not root.exists()
     try:
         dataset = open_dataset(rec, robot_type, features, resume)
-    except ValueError as e:
-        raise SystemExit(f"can't add to {root}: it was recorded differently ({e}). Nothing was started; "
-                         f"use a new --name") from None
+    except BaseException as e:
+        if created and root.exists():           # ours, from seconds ago, with no demo in it: it
+            shutil.rmtree(root)                 # would block this --name ("already exists")
+        if isinstance(e, DatasetMismatch):
+            raise SystemExit(f"can't add to {root}: it was recorded differently ({e}). Nothing was "
+                             f"started; use a new --name") from None
+        if isinstance(e, Exception):
+            raise SystemExit(f"can't open the dataset at {root}: {type(e).__name__}: {e}. Nothing was "
+                             f"started") from None
+        raise
     before = dataset.num_episodes
     frozen = tuple(arm_cfg["frozen_joints"])
     leader = follower = None
@@ -586,30 +656,34 @@ def record_live(rec, arm_cfg: dict, max_step: float, resume: bool, log=None) -> 
         problem = f"{type(e).__name__}: {e}"
     finally:
         try:
-            if problem and commanded:
-                try:
-                    log(f"\n{problem}: no more commands; the follower holds where it is. Closing, and keeping "
-                        f"the saved demos (Ctrl-C again abandons that) ...")
-                except BaseException:  # noqa: BLE001 - a second Ctrl-C: still close everything
-                    pass
+            try:
+                if problem == "Ctrl-C" and commanded:
+                    stop.acknowledge(log)           # unless the loop already did
+                elif problem and commanded:
+                    log(f"\n{problem}: no more commands; the follower holds where it is, torque on. "
+                        f"Keeping the saved demos ...")
+            except BaseException:  # noqa: BLE001 - a second Ctrl-C here: still close everything
+                pass
             for cam in cameras.values():
                 _close(cam, notes)
             for device in (follower, leader):       # RealArm.close leaves the torque on: it holds
                 if device is not None:
                     _close(device, notes)
-            try:
-                if dataset.has_pending_frames():
-                    dataset.clear_episode_buffer()
-                    discarded = True
-            except BaseException as e:  # noqa: BLE001
-                notes.append(f"discarding the unsaved demo failed: {type(e).__name__}: {e}")
-            try:
-                dataset.finalize()
-                images = root / "images"            # as lerobot-record's VideoEncodingManager: drop the
-                if images.is_dir() and not any(images.rglob("*.png")) and not any(images.rglob("*.tiff")):
-                    shutil.rmtree(images)           # temporary frame folders once they are empty
-            except BaseException as e:  # noqa: BLE001
-                notes.append(f"finalizing the dataset failed: {type(e).__name__}: {e}")
+            with stop.protected():                  # from here on Ctrl-C can't cut a write short
+                try:
+                    if dataset.has_pending_frames():
+                        dataset.clear_episode_buffer()
+                        discarded = True
+                except Exception as e:  # noqa: BLE001
+                    notes.append(f"discarding the unsaved demo failed: {type(e).__name__}: {e}")
+                try:
+                    dataset.finalize()
+                    images = root / "images"        # as lerobot-record's VideoEncodingManager: drop the
+                    if images.is_dir() and not any(images.rglob("*.png")) and not any(images.rglob("*.tiff")):
+                        shutil.rmtree(images)       # temporary frame folders once they are empty
+                except Exception as e:  # noqa: BLE001
+                    mark_broken(root, f"finalizing the dataset failed: {type(e).__name__}: {e}")
+                    notes.append(f"finalizing the dataset failed: {type(e).__name__}: {e}")
         finally:
             if restore is not None:
                 restore()
@@ -624,9 +698,12 @@ def record_live(rec, arm_cfg: dict, max_step: float, resume: bool, log=None) -> 
     log(f"\n{saved} demo(s) saved this run" + (" (an unsaved demo was discarded)" if discarded else "")
         + (f"; nothing recorded, so {root} was removed again" if removed
            else f"; {root} has {dataset.num_episodes}"))
+    if not removed and (root / BROKEN_MARKER).exists():
+        log(f"WARNING: a save failed part-way, so {root} is marked broken ({BROKEN_MARKER}): its files may "
+            f"not match meta/info.json. Don't --resume it; record the remaining demos into a new --name.")
     if follower is not None:
         log("The follower is holding its pose with the torque on: rest it or hold it before you switch it off.")
-    return 1 if problem else 0
+    return 1 if problem or (not removed and (root / BROKEN_MARKER).exists()) else 0
 
 
 def _count(minimum: int):
@@ -692,6 +769,9 @@ def main(argv=None) -> int:
 
     if args.resume and not (root / "meta" / "info.json").exists():
         raise SystemExit(f"nothing to resume at {root} (no meta/info.json); check --name")
+    if args.resume and (root / BROKEN_MARKER).exists():
+        raise SystemExit(f"won't resume {root}: a save failed part-way there ({root / BROKEN_MARKER}), so its "
+                         f"files may not match meta/info.json. Record the remaining demos into a new --name")
     if root.exists() and not args.resume:
         raise SystemExit(f"{root} already exists; pick a new --name or pass --resume")
     frozen_note = "".join(f"\n  - {j} is frozen: it never moves and is recorded as {FROZEN_READING:g}."

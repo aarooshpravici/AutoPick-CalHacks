@@ -3,6 +3,7 @@ config parser and never run. The native recorder (--run) runs against fakes only
 port or camera is ever opened (the no_hardware fixture fails the test if one is), nothing is
 exec'd, and every dataset is written under tmp_path."""
 
+import contextlib
 import copy
 import json
 import math
@@ -261,6 +262,7 @@ class Hardware:
         self.fail_open = set()
         self.camera_error_at = None     # camera read number that raises (a stalled webcam)
         self.camera_reads = 0
+        self.on_command = None          # called with the command number before it completes
 
     def read_key(self, timeout_s):
         self.all_polls += 1
@@ -306,7 +308,9 @@ class FakeFollower:
 
     def command(self, targets):
         self.hw.events.append("command")
-        self.commands.append(dict(targets))
+        if self.hw.on_command is not None:          # e.g. a Ctrl-C arriving mid-command
+            self.hw.on_command(len(self.commands) + 1)
+        self.commands.append(dict(targets))         # only a command that wasn't cut short counts
         self.pos.update({j: float(v) for j, v in targets.items()})
 
     def close(self):
@@ -330,17 +334,22 @@ class FakeWebcam:
 
 
 class FakeDataset:
-    """The LeRobotDataset calls the Recorder makes, in memory."""
+    """The LeRobotDataset calls the Recorder makes, in memory. on_save, if set, runs half-way
+    through each save (after it started, before it completed)."""
 
-    def __init__(self, features):
+    def __init__(self, features, root="/nonexistent-fake-dataset"):
         self.features = features
+        self.root = root
         self.buffer, self.episodes, self.saves = [], [], []
+        self.on_save = None
 
     def add_frame(self, frame):
         self.buffer.append(frame)
 
     def save_episode(self, parallel_encoding=True):
         self.saves.append(parallel_encoding)
+        if self.on_save is not None:
+            self.on_save()
         self.episodes.append(self.buffer)
         self.buffer = []
 
@@ -602,6 +611,15 @@ def test_read_key_from_an_unwatchable_input_is_an_error(monkeypatch):
 
 # --- Ctrl-C --------------------------------------------------------------------------------
 
+@contextlib.contextmanager
+def no_escaping_ctrl_c():
+    """A KeyboardInterrupt in here fails the test (pytest would otherwise stop the whole session)."""
+    try:
+        yield
+    except KeyboardInterrupt:
+        pytest.fail("a Ctrl-C raised where it must only be counted")
+
+
 def test_ctrl_c_flag_stops_before_the_next_command(features):
     hw = Hardware()
     stop = record.Stop()
@@ -645,6 +663,47 @@ def test_ctrl_c_handler_is_installed_and_restored():
     assert signal.getsignal(signal.SIGINT) is before
 
 
+def test_ctrl_c_presses_only_count_inside_a_protected_section():
+    stop = record.Stop()
+    with no_escaping_ctrl_c(), stop.protected():
+        stop.press()
+        stop.press()                                        # would raise outside
+        stop.press()
+    assert stop.presses == 3 and stop.is_set()
+    with pytest.raises(KeyboardInterrupt):
+        stop.press()                                        # outside again: a second press interrupts
+
+
+def test_a_double_ctrl_c_during_a_save_lets_the_save_finish(features):
+    hw = Hardware()
+    stop = record.Stop()
+    ds = FakeDataset(features)
+    ds.on_save = lambda: (stop.press(), stop.press())      # both presses arrive while saving demo 1
+    logs = []
+    rec = make_recorder(hw, ds, episodes=3, reset_time_s=0, stop=stop)
+    rec.log = logs.append
+    with pytest.raises(KeyboardInterrupt):
+        rec.run()
+    assert [len(d) for d in ds.episodes] == [30]            # saved whole, then stopped
+    assert len(hw.follower.commands) == 30                  # no command after the save
+    assert any("saving demo 1" in m and "Ctrl-C" in m for m in logs)
+    assert sum("Ctrl-C: stopping" in m for m in logs) == 1  # acknowledged once, by the loop
+
+
+def test_a_failed_save_marks_the_dataset_broken(features, tmp_path):
+    hw = Hardware()
+    ds = FakeDataset(features, root=tmp_path)
+
+    def disk_full():
+        raise OSError(28, "No space left on device")
+
+    ds.on_save = disk_full
+    with pytest.raises(OSError):
+        make_recorder(hw, ds, episodes=2, reset_time_s=0).run()
+    marker = tmp_path / record.BROKEN_MARKER
+    assert "saving demo 1 failed" in marker.read_text() and "No space left" in marker.read_text()
+
+
 # --- --run end to end, with fake hardware and a real LeRobotDataset --------------------------
 
 @pytest.fixture
@@ -670,6 +729,7 @@ def live(tmp_path, monkeypatch, no_hardware):
         hw.opened.append(("leader", port, robot_id))
         hw.leader = FakeLeader(hw)
         hw.started = False              # each run starts demo 1 with an Enter
+        hw.polls = 0                    # and counts its key polls from demo 1 again
         return hw.leader
 
     def follower(port, robot_id, max_relative_target, frozen=()):
@@ -898,6 +958,187 @@ def test_resume_refuses_a_dataset_recorded_differently(live):
     assert live.opened == []                                       # before anything is opened
     info, _ = saved_frames(record.DATASETS / "demo1")
     assert info["total_episodes"] == 1
+
+
+# --- review fixes: the speed cap end to end, Ctrl-C during writes, untouched resumes ---------------
+
+def snapshot(root: Path) -> dict:
+    """Every file's bytes and every folder under root, to prove a run left them as they were."""
+    return {str(p.relative_to(root)): (p.read_bytes() if p.is_file() else None) for p in sorted(root.rglob("*"))}
+
+
+def press_ctrl_c():
+    """What Ctrl-C does to this process, without sending a real SIGINT: call the installed handler."""
+    signal.getsignal(signal.SIGINT)(signal.SIGINT, None)
+
+
+def run_live_catching_ctrl_c(hw, *extra, **kw):
+    """run_live, where a KeyboardInterrupt escaping it (a Ctrl-C that cut a write short) fails the
+    test instead of stopping the whole pytest session."""
+    with no_escaping_ctrl_c():
+        return run_live(hw, *extra, **kw)
+
+
+def test_run_steps_the_follower_at_speed_over_fps(live):
+    """main must hand record_live the per-frame step (speed / fps), not the speed itself."""
+    live.leader_pose = lambda t: {**READY, "shoulder_pan": 60.0}
+    assert run_live(live, "--speed", "25", episodes=1, reset=0) == 0
+    pans = [READY["shoulder_pan"]] + [c["shoulder_pan"] for c in live.follower.commands]
+    steps = [b - a for a, b in zip(pans, pans[1:])]
+    assert steps and all(s == pytest.approx(25 / 30) for s in steps)
+
+
+def test_run_routes_ctrl_c_to_a_clean_stop_between_commands(live, capsys):
+    """record_live installs the Stop handler: a Ctrl-C that lands in the middle of a command lets
+    that command finish (Python's default handler would raise inside it), and the loop stops
+    before the next one."""
+    seen = []
+
+    def ctrl_c_mid_command(n):
+        if n == 40:                                         # demo 2, 10th frame (no reset)
+            seen.append(signal.getsignal(signal.SIGINT))
+            press_ctrl_c()
+
+    live.on_command = ctrl_c_mid_command
+    assert run_live_catching_ctrl_c(live, episodes=3, reset=0) == 1
+    assert seen[0] is not signal.default_int_handler and isinstance(getattr(seen[0], "__self__", None), record.Stop)
+    assert len(live.follower.commands) == 40                # command 40 finished, nothing after it
+    assert live.events.count("command") == 40
+    info, _ = saved_frames(record.DATASETS / "demo1")
+    assert info["total_episodes"] == 1
+    out = capsys.readouterr().out
+    assert out.count("Ctrl-C: stopping") == 1
+
+
+def lerobot_writer():
+    from lerobot.datasets.dataset_writer import DatasetWriter
+
+    return DatasetWriter
+
+
+def assert_consistent(root: Path, episodes: int, frames: int):
+    """meta/info.json, the parquet rows and the leftover frames all agree."""
+    info, data = saved_frames(root)
+    assert (info["total_episodes"], info["total_frames"]) == (episodes, frames)
+    assert len(data) == frames and sorted(set(data["episode_index"])) == list(range(episodes))
+    assert not list(root.rglob("*.png"))
+
+
+def test_a_double_ctrl_c_mid_save_leaves_a_consistent_dataset(live, monkeypatch):
+    writer = lerobot_writer()
+    real_save = writer._save_episode_data
+    calls = []
+
+    def save_then_ctrl_c_twice(self, buffer):
+        out = real_save(self, buffer)                       # the parquet rows are written ...
+        calls.append(1)
+        if len(calls) == 1:
+            press_ctrl_c()                                  # ... and Ctrl-C twice before the save ends
+            press_ctrl_c()
+        return out
+
+    monkeypatch.setattr(writer, "_save_episode_data", save_then_ctrl_c_twice)
+    assert run_live_catching_ctrl_c(live, episodes=3, reset=0) == 1
+    root = record.DATASETS / "demo1"
+    assert_consistent(root, 1, 30)
+    assert not (root / record.BROKEN_MARKER).exists()
+    assert run_live(live, "--resume", episodes=1, reset=0) == 0       # and it still resumes cleanly
+    assert_consistent(root, 2, 60)
+
+
+def test_a_double_ctrl_c_mid_finalize_still_finalizes(live, monkeypatch):
+    from lerobot.datasets import LeRobotDataset
+
+    real_finalize = LeRobotDataset.finalize
+
+    def ctrl_c_twice_then_finalize(self):
+        press_ctrl_c()
+        press_ctrl_c()
+        return real_finalize(self)
+
+    monkeypatch.setattr(LeRobotDataset, "finalize", ctrl_c_twice_then_finalize)
+    assert run_live_catching_ctrl_c(live, episodes=2) == 0
+    assert_consistent(record.DATASETS / "demo1", 2, 60)
+
+
+def test_a_failing_save_marks_the_dataset_and_resume_refuses_it(live, monkeypatch, capsys):
+    writer = lerobot_writer()
+    real_save = writer._save_episode_data
+    calls = []
+
+    def second_save_fails(self, buffer):
+        calls.append(1)
+        if len(calls) == 2:
+            raise OSError(28, "No space left on device")
+        return real_save(self, buffer)
+
+    monkeypatch.setattr(writer, "_save_episode_data", second_save_fails)
+    assert run_live(live, episodes=3, reset=0) == 1
+    root = record.DATASETS / "demo1"
+    assert "saving demo 2 failed" in (root / record.BROKEN_MARKER).read_text()
+    out = capsys.readouterr().out
+    assert "marked broken" in out and "new --name" in out
+    assert saved_frames(root)[0]["total_episodes"] == 1
+    before = snapshot(root)
+    with pytest.raises(SystemExit, match="won't resume.*new --name"):
+        run_live(live, "--resume", episodes=1)
+    assert snapshot(root) == before
+
+
+def test_a_create_that_fails_after_its_mkdir_does_not_block_the_name(live, monkeypatch):
+    from lerobot.datasets import LeRobotDataset
+
+    real_create = LeRobotDataset.create
+
+    def mkdir_then_fail(*args, root=None, **kwargs):
+        Path(root).mkdir(parents=True)
+        raise ValueError("bad feature spec")
+
+    monkeypatch.setattr(LeRobotDataset, "create", mkdir_then_fail)
+    with pytest.raises(SystemExit) as exc:
+        run_live(live)
+    assert "bad feature spec" in str(exc.value) and "recorded differently" not in str(exc.value)
+    assert not (record.DATASETS / "demo1").exists() and live.opened == []
+    monkeypatch.setattr(LeRobotDataset, "create", real_create)
+    assert run_live(live, episodes=1) == 0
+
+
+@pytest.fixture
+def resumed(live):
+    """A dataset with one demo, and a snapshot of its files, ready for a --resume run."""
+    assert run_live(live, episodes=1) == 0
+    root = record.DATASETS / "demo1"
+    live.opened.clear()
+    return root, snapshot(root)
+
+
+def test_resume_then_q_before_demo_1_leaves_the_dataset_untouched(live, resumed):
+    root, before = resumed
+    live.before_start = ["q"]
+    assert run_live(live, "--resume") == 0
+    assert root.exists() and snapshot(root) == before
+
+
+def test_resume_then_q_mid_demo_leaves_the_dataset_untouched(live, resumed):
+    root, before = resumed
+    live.keys = {10: "q"}                                   # 10 frames into the new demo
+    assert run_live(live, "--resume") == 0
+    assert snapshot(root) == before
+
+
+def test_resume_then_ctrl_c_mid_demo_leaves_the_dataset_untouched(live, resumed):
+    root, before = resumed
+    live.on_leader_read = lambda n: press_ctrl_c() if n == live.leader_reads_at_start + 10 else None
+    live.leader_reads_at_start = live.leader_reads
+    assert run_live(live, "--resume") == 1
+    assert snapshot(root) == before
+
+
+def test_resume_then_a_leader_failure_leaves_the_dataset_untouched(live, resumed):
+    root, before = resumed
+    live.fail_open.add("leader")
+    assert run_live(live, "--resume") == 1
+    assert snapshot(root) == before
 
 
 # --- slow: record two fake demos into a real dataset, then train ACT on it -------------------

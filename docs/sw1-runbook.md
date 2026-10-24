@@ -104,7 +104,8 @@ Keys, typed in the recording terminal and followed by Enter:
 
 - **`r`:** discards the demo in progress, or during its reset the one just finished, and records it again.
 - **`q`:** saves the finished demos and stops. A demo still in progress is not saved, so press Enter first to keep it.
-- **Ctrl-C:** stops now. The follower holds where it is; saved demos are kept and the unsaved one is dropped.
+- **Ctrl-C:** stops now. The follower holds where it is; saved demos are kept and the unsaved one is dropped, including a finished demo still in its reset (`q` is the key that saves it). A demo that is being saved always finishes first, even if you press Ctrl-C again.
+- **A save failed** (for example, a full disk)? The dataset is marked broken (`RECORDING_BROKEN.txt`) and `--resume` refuses it. Record the remaining demos into a new `--name`.
 
 - **At the end:** the follower keeps holding its pose with the torque on. Rest it or hold it before you switch it off.
 - **Stopped part-way?** Add the rest with `--resume`, for example `python -m training.record --name grasp_v1 --episodes 20 --run --resume`. Without `--resume`, an existing dataset is refused.
