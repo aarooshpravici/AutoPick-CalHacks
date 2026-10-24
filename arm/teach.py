@@ -1,11 +1,15 @@
 """Teach the pick poses with the leader arm (task A3, plan 10.1).
 
-    python -m arm.teach [--out PATH] [--speed DEG_S] [--config PATH] [--dry-run]
+    python -m arm.teach [--out PATH] [--speed DEG_S] [--config PATH] [--with-tray] [--dry-run]
 
 The follower copies the leader, speed-capped. The person moves the leader and
 presses Enter at each step; the follower's position is recorded (it's what
 pick.py will command). Saves config/poses.json, then reloads it to check. An
 existing file is backed up to data/poses_backup/ first.
+
+The steps are the hand-off poses (ready, above_object, at_object, lift, present),
+then the claw open and closed. --with-tray also teaches above_tray, after present,
+for the stretch tray mode.
 
 Speed: config/robot.yaml `arm.move_speed_deg_s` is the ceiling, as for arm.pick.
 The follower copies the leader at that speed by default; a larger --speed is
@@ -32,15 +36,16 @@ from .pick import (DEFAULT_CONFIG_PATH, MAX_SPEED_DEG_S, RATE_HZ, RealClock, _is
                    load_arm_config, resolve_speed)
 from .poses import ARM_JOINTS, JOINTS, POSE_NAMES, REPO_ROOT
 
-STEPS = [
+STEPS = [                   # hand mode; teach_steps(with_tray=True) adds TRAY_STEP after present
     ("ready", "the start pose: arm up and out of the front camera's view"),
     ("above_object", "claw open, a few cm straight above the object on the parking spot"),
     ("at_object", "claw open, fingertips just above the floor around the object"),
     ("lift", "the carry pose: object raised clear of the deck"),
-    ("above_tray", "claw over the tray at its lowest position"),
+    ("present", "the hand-off pose: claw raised high and pointing forward, in easy reach"),
     ("gripper_open", "open the claw fully"),
     ("gripper_closed", "close the claw fully, with nothing in it"),
 ]
+TRAY_STEP = ("above_tray", "claw over the tray at its lowest position (stretch tray mode)")
 CONFIG_KEYS = ("follower_port", "follower_id", "leader_port", "leader_id")
 SAME_POSE_DEG = 2.0         # a pose this close to the previous one on every arm joint wasn't moved to
 DRY_RUN_LIMIT_S = 600.0     # simulated seconds the scripted person waits for the follower per step
@@ -90,12 +95,21 @@ def enter_waiter(step: str, prompt: str) -> _EnterPress:
     return _EnterPress(prompt)
 
 
-def dry_run_targets(poses: dict) -> dict:
-    """Where the scripted person puts the leader at each step: the five poses, then the
-    claw open and closed over the tray."""
-    targets = {name: dict(poses[name]) for name in POSE_NAMES}
-    targets["gripper_open"] = {**poses["above_tray"], "gripper": poses["gripper_open"]}
-    targets["gripper_closed"] = {**poses["above_tray"], "gripper": poses["gripper_closed"]}
+def teach_steps(with_tray: bool = False) -> list:
+    """The (name, hint) steps in order: STEPS, plus TRAY_STEP right after present."""
+    if not with_tray:
+        return list(STEPS)
+    at = [name for name, _ in STEPS].index("present") + 1
+    return [*STEPS[:at], TRAY_STEP, *STEPS[at:]]
+
+
+def dry_run_targets(poses: dict, with_tray: bool = False) -> dict:
+    """Where the scripted person puts the leader at each step: the poses, then the claw open
+    and closed at the last of them (present, or above_tray with the tray)."""
+    names = [name for name, _ in teach_steps(with_tray) if name in POSE_NAMES]
+    targets = {name: dict(poses[name]) for name in names}
+    targets["gripper_open"] = {**poses[names[-1]], "gripper": poses["gripper_open"]}
+    targets["gripper_closed"] = {**poses[names[-1]], "gripper": poses["gripper_closed"]}
     return targets
 
 
@@ -134,11 +148,13 @@ def _same_pose(a: dict, b: dict) -> bool:
     return all(abs(a[j] - b[j]) < SAME_POSE_DEG for j in ARM_JOINTS)
 
 
-def teach(leader, follower, speed_deg_s: float, wait_for=enter_waiter, log=print) -> dict:
+def teach(leader, follower, speed_deg_s: float, wait_for=enter_waiter, log=print,
+          with_tray: bool = False) -> dict:
     """Mirror leader -> follower at speed_deg_s; record the follower at each step.
 
     wait_for(step, prompt) returns an object whose is_set() is polled every tick and turns
-    true when the person pressed Enter. Returns the validated poses (raises PosesError)."""
+    true when the person pressed Enter. with_tray also teaches above_tray. Returns the
+    validated poses (raises PosesError)."""
     if not (_is_number(speed_deg_s) and 0 < speed_deg_s <= MAX_SPEED_DEG_S):
         raise ValueError(f"speed_deg_s must be in (0, {MAX_SPEED_DEG_S:g}] deg/s (plan section 17), "
                          f"got {speed_deg_s!r}")
@@ -149,7 +165,7 @@ def teach(leader, follower, speed_deg_s: float, wait_for=enter_waiter, log=print
     recorded = {}
     last_name = None
     try:
-        for name, hint in STEPS:
+        for name, hint in teach_steps(with_tray):
             prompt = f"[{name}] {hint}. Press Enter here when the follower is there: "
             while True:
                 pressed = wait_for(name, prompt)
@@ -172,10 +188,10 @@ def teach(leader, follower, speed_deg_s: float, wait_for=enter_waiter, log=print
             log(f"  {name}: " + ", ".join(f"{j} {pose[j]:.1f}" for j in JOINTS))
     finally:
         follower.command(follower.read())       # hold where it is
-    poses = {name: recorded[name] for name in POSE_NAMES}
+    poses = {name: recorded[name] for name in POSE_NAMES if name in recorded}
     poses["gripper_open"] = recorded["gripper_open"]["gripper"]
     poses["gripper_closed"] = recorded["gripper_closed"]["gripper"]
-    return poses_mod.validate(poses)
+    return poses_mod.validate(poses, "tray" if with_tray else "hand")    # present is always taught
 
 
 def save_with_backup(poses: dict, out: Path) -> Path | None:
@@ -216,6 +232,8 @@ def main(argv=None) -> int:
                         help="follower speed cap, deg/s: at most robot.yaml arm.move_speed_deg_s "
                              "(the default); first real runs: 25")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
+    parser.add_argument("--with-tray", action="store_true",
+                        help="also teach above_tray, for the stretch tray mode (python -m arm.pick run --to tray)")
     parser.add_argument("--dry-run", action="store_true",
                         help="no hardware: a scripted person moves a simulated leader through the "
                              "sim's default poses")
@@ -237,7 +255,7 @@ def main(argv=None) -> int:
         if args.dry_run:
             from .sim import DEFAULT_POSES, SimArm, SimLeader
             follower, leader = SimArm(), SimLeader()
-            wait_for = scripted_waiter(leader, follower, dry_run_targets(DEFAULT_POSES))
+            wait_for = scripted_waiter(leader, follower, dry_run_targets(DEFAULT_POSES, args.with_tray))
         else:
             from .real import RealArm, RealLeader
             # The leader is read-only, so open it first: if it fails, the follower is never touched.
@@ -247,7 +265,7 @@ def main(argv=None) -> int:
             wait_for = enter_waiter
         print(f"teaching at {speed:g} deg/s" + (" (dry run, no hardware)" if args.dry_run else ""),
               flush=True)
-        poses = teach(leader, follower, speed, wait_for=wait_for)
+        poses = teach(leader, follower, speed, wait_for=wait_for, with_tray=args.with_tray)
     except KeyboardInterrupt:
         _error("\nstopped; nothing saved")
         return 1

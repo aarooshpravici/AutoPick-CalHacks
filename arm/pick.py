@@ -1,11 +1,29 @@
-"""Pick sequence: floor -> tray (plan sections 9.4 and 10.1).
+"""Pick sequence: floor -> the person's hand, or (stretch) the tray (plan 9.4, 10.1, 10.6).
 
+    result = pick_to_hand(arm, poses, pan_deg=0.0, roll_deg=0.0, policy=None, speed_deg_s=45,
+                          handoff_timeout_s=60, stop_event=None, on_state=None)
     result = pick_to_tray(arm, poses, pan_deg=0.0, roll_deg=0.0, policy=None, speed_deg_s=45)
 
-    python -m arm.pick run [--policy DIR] [--pan DEG] [--roll DEG] [--speed DEG_S] [--dry-run]
+    python -m arm.pick run [--to hand|tray] [--policy DIR] [--pan DEG] [--roll DEG]
+                           [--speed DEG_S] [--handoff-timeout S] [--dry-run]
 
-The last printed line is `RESULT {json}`. Exit codes: 0 in_tray, 1 error or stopped,
-2 missed, 3 dropped, 4 stuck.
+The last printed line is `RESULT {json}`. Exit codes: 0 taken or in_tray, 1 error or
+stopped, 2 missed, 3 dropped, 4 stuck, 5 timeout. The default is --to hand.
+
+Hand-off (pick_to_hand): after the grasp the arm carries the object up to `lift`, then
+to `present` at no more than PRESENT_SPEED_DEG_S (a person is near, plan 17), and holds
+it there, still squeezing. When the person pulls it out, the claw closes fully: read on
+the closed side TAKE_READS times in a row (at TAKE_POLL_HZ), that is a take, and the
+arm opens the claw and goes back to `ready` ("taken"). The person reaches only once
+the arm has stopped (plan 17), so a claw that starts closing within TAKE_SETTLE_S of
+arriving lost the object on its own ("dropped"), as does a claw that reads open for
+TAKE_READS reads in a row. A slip later than that looks exactly like a take (known
+limit, plan 10.7). If nobody takes it within handoff_timeout_s (robot.yaml
+handoff.timeout_s), the arm goes back to `lift`, still holding ("timeout"; "dropped"
+if the claw no longer holds it there). The moves away from `present` run at the same
+lower speed.
+on_state, if given, is called with "pick" at the start, "present" as the move to
+`present` starts and "wait_for_take" once the arm is there and still holding.
 
 `arm` is anything with read() -> {joint: value}, command({joint: value}) and close():
 arm.sim.SimArm or arm.real.RealArm. If it has a `clock` (the sim does), timing runs
@@ -16,20 +34,22 @@ joints, and optionally reset(); or an ACT checkpoint folder, which load_policy()
 opens with the robot.yaml webcams (arm/policy.py). It drives from `ready`, one step
 per frame at RATE_HZ (the rate the demos were recorded at), until it asks for a
 closed claw and the claw has stood still short of closed for 8 frames; then the
-claw is squeezed shut, checked like a scripted grasp, and the scripted lift takes
+claw is squeezed shut, checked like a scripted grasp, and the scripted carry takes
 over. A claw standing still fully closed for 8 frames closed on nothing (a missed
 attempt). The 20 s time limit applies to each attempt; when it runs out the claw
 is closed and checked the same way.
 
 Speed: config/robot.yaml `arm.move_speed_deg_s` is the ceiling (plan 9.1, 17). The
 command line runs at that speed by default and refuses a larger --speed; first real
-runs use --speed 25. pick_to_tray() itself also refuses anything above the plan's
-45 deg/s arm limit (MAX_SPEED_DEG_S), for callers that skip load_arm_config().
+runs use --speed 25. pick_to_hand() and pick_to_tray() themselves also refuse anything
+above the plan's 45 deg/s arm limit (MAX_SPEED_DEG_S), for callers that skip
+load_arm_config().
 """
 
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import math
 import numbers
@@ -55,9 +75,14 @@ POLICY_HOLD_FRAMES = 8
 POLICY_TIME_LIMIT_S = 20.0      # per attempt
 GRIP_STILL_DEG = 0.3            # policy mode: claw moved less than this since the last frame = stopped
 MAX_SPEED_DEG_S = 45.0          # plan section 17 arm limit; robot.yaml move_speed_deg_s is the working ceiling
+PRESENT_SPEED_DEG_S = 25.0      # plan section 17: moves to and from `present` are near a person
+TAKE_POLL_HZ = 20               # claw reads while waiting for the take
+TAKE_READS = 6                  # reads in a row (about 0.3 s) that decide a take or a drop
+TAKE_SETTLE_S = 1.0             # nobody reaches this soon after the arm stops: closing then is a slip
 DEFAULT_CONFIG_PATH = REPO_ROOT / "config" / "robot.yaml"
 
-EXIT_CODES = {"in_tray": 0, "stopped": 1, "error": 1, "missed": 2, "dropped": 3, "stuck": 4}
+EXIT_CODES = {"taken": 0, "in_tray": 0, "stopped": 1, "error": 1, "missed": 2, "dropped": 3, "stuck": 4,
+              "timeout": 5}
 
 
 class RealClock:
@@ -129,14 +154,14 @@ class _Picker:
             target["wrist_roll"] += self.roll
         return target
 
-    def move(self, name: str, grip: float, offsets: bool = False) -> None:
-        """Move all arm joints together to a pose at self.speed. The claw target is sent
-        straight away, never ramped (ramping loosens the grip and drops the object)."""
+    def move(self, name: str, grip: float, offsets: bool = False, speed: float | None = None) -> None:
+        """Move all arm joints together to a pose at `speed` (default self.speed). The claw
+        target is sent straight away, never ramped (ramping loosens the grip and drops the object)."""
         self.log(f"move {name}")
         target = self._target(name, offsets)
         pos = self.arm.read()
         start = {j: pos[j] for j in ARM_JOINTS}
-        duration = max(abs(target[j] - start[j]) for j in ARM_JOINTS) / self.speed
+        duration = max(abs(target[j] - start[j]) for j in ARM_JOINTS) / (speed or self.speed)
         t0 = self.clock.now()
         while True:
             self._check_stop()
@@ -237,13 +262,59 @@ class _Picker:
         stopped = self.set_grip(self.g_squeeze)
         return stopped and self.holding()
 
+    def wait_for_take(self, timeout_s: float) -> str:
+        """Hold still at the present pose, still squeezing, and read the claw at TAKE_POLL_HZ.
+        Returns "taken" once it reads on the closed side TAKE_READS times in a row (the person
+        pulled the object out and the claw closed on nothing), or "dropped" if that closing
+        began within TAKE_SETTLE_S of arriving (nobody had reached yet: it slipped out) or the
+        claw reads open TAKE_READS times in a row. "timeout" if timeout_s passes first."""
+        self.log("wait for take")
+        dt = 1.0 / TAKE_POLL_HZ
+        closed = opened = 0
+        closed_since = None
+        t0 = self.clock.now()
+        while True:
+            now = self.clock.now()
+            if now - t0 >= timeout_s:
+                return "timeout"
+            self._check_stop()
+            # Re-send the carry target at every read: LeRobot caps each command's step
+            # (max_relative_target), so one command alone would stop the claw short of closed.
+            self._send(self.joint_cmd, self.g_squeeze)
+            g = self.arm.read()["gripper"]
+            if self._closed_side(g):
+                closed_since = now if closed == 0 else closed_since
+                closed += 1
+            else:
+                closed = 0
+            opened = 0 if self._closed_side(g) or claw_holding(g, self.g_open, self.g_closed) else opened + 1
+            if closed >= TAKE_READS:
+                if closed_since - t0 < TAKE_SETTLE_S:
+                    self.log("claw closed before anyone could reach: the object slipped out")
+                    return "dropped"
+                self.log("taken")
+                return "taken"
+            if opened >= TAKE_READS:
+                self.log("claw reads open: the object fell")
+                return "dropped"
+            self.clock.sleep(dt)
+
     # --- sequence ------------------------------------------------------------
 
-    def _back_to_ready(self) -> None:
+    def _back_to_ready(self, speed: float | None = None) -> None:
         self.set_grip(self.g_open)
-        self.move("ready", self.g_open)
+        self.move("ready", self.g_open, speed=speed)
 
-    def run(self, policy, result: dict) -> None:
+    def carry(self, name: str, speed: float | None = None) -> None:
+        """Move to a pose squeezing the object. If the claw no longer holds it there: open,
+        go back to ready and report "dropped"."""
+        self.move(name, self.g_squeeze, speed=speed)
+        if not self.holding():
+            self._back_to_ready(speed)
+            raise _Abort("dropped", f"object lost on the way to {name}")
+
+    def pick_up(self, policy, result: dict) -> None:
+        """ready -> grasp (scripted or policy, with retries) -> straight up -> lift, holding."""
         self.move("ready", self.g_open)
         while True:
             result["attempts"] += 1
@@ -264,15 +335,35 @@ class _Picker:
                 raise _Abort("missed", f"claw empty after {ATTEMPTS} attempts")
 
         self.move("above_object", self.g_squeeze, offsets=True)
-        for name in ("lift", "above_tray"):
-            self.move(name, self.g_squeeze)
-            if not self.holding():
-                self._back_to_ready()
-                raise _Abort("dropped", f"object lost on the way to {name}")
+        self.carry("lift")
+
+    def run_tray(self, policy, result: dict) -> None:
+        self.pick_up(policy, result)
+        self.carry("above_tray")
         self.set_grip(self.g_open)
         self.move("lift", self.g_open)
         self.move("ready", self.g_open)
         result["detail"] = "released over the tray"
+
+    def run_hand(self, policy, result: dict, timeout_s: float, on_state) -> None:
+        on_state("pick")
+        self.pick_up(policy, result)
+        near_person = min(self.speed, PRESENT_SPEED_DEG_S)
+        on_state("present")
+        self.carry("present", speed=near_person)
+        on_state("wait_for_take")
+        outcome = self.wait_for_take(timeout_s)
+        if outcome == "dropped":
+            self._back_to_ready(near_person)
+            raise _Abort("dropped", "object slipped out at the present pose before anyone could take it")
+        if outcome == "taken":
+            self.set_grip(self.g_open)
+            self.move("ready", self.g_open, speed=near_person)
+            result["detail"] = "taken at the present pose"
+            return
+        self.carry("lift", speed=near_person)       # "timeout" promises it still holds (plan 9.4)
+        result["result"] = "timeout"
+        result["detail"] = f"not taken within {timeout_s:g} s; holding at lift"
 
 
 def close_cameras(cameras: dict) -> list[str]:
@@ -326,10 +417,9 @@ def load_policy(path, cameras: dict | None = None, config_path: str | Path | Non
         raise
 
 
-def pick_to_tray(arm, poses, pan_deg=0.0, roll_deg=0.0, policy=None, speed_deg_s=45,
-                 stop_event: threading.Event | None = None, log=None) -> dict:
-    """Pick the object at the parking spot and drop it in the tray. See the module docstring.
-    stop_event: set it from another thread to stop; the arm holds where it is.
+def _pick(mode, sequence, arm, poses, pan_deg, roll_deg, policy, speed_deg_s, stop_event, log) -> dict:
+    """Shared by pick_to_hand and pick_to_tray. Checks the arguments and the poses `mode`
+    needs before anything moves, then runs sequence(picker, policy, result).
     policy may be a checkpoint folder: its webcams are opened here and closed at the end."""
     if not (_is_number(speed_deg_s) and 0 < speed_deg_s <= MAX_SPEED_DEG_S):
         raise ValueError(f"speed_deg_s must be in (0, {MAX_SPEED_DEG_S:g}] deg/s (plan section 17), "
@@ -337,17 +427,18 @@ def pick_to_tray(arm, poses, pan_deg=0.0, roll_deg=0.0, policy=None, speed_deg_s
     for name, value in (("pan_deg", pan_deg), ("roll_deg", roll_deg)):
         if not _is_number(value):
             raise ValueError(f"{name} must be a finite number, got {value!r}")
-    poses_mod.validate(poses)
+    poses_mod.validate(poses, mode)
     opened = isinstance(policy, (str, Path))
     if opened:
         policy = load_policy(policy)    # closes its own cameras if it fails
     try:
         picker = _Picker(arm, poses, pan_deg, roll_deg, speed_deg_s, stop_event, log or (lambda msg: None))
-        result = {"result": "in_tray", "grasp": "policy" if policy is not None else "scripted",
+        result = {"result": "taken" if mode == "hand" else "in_tray",
+                  "grasp": "policy" if policy is not None else "scripted",
                   "attempts": 0, "seconds": 0.0, "detail": ""}
         t0 = picker.clock.now()
         try:
-            picker.run(policy, result)
+            sequence(picker, policy, result)
         except _Abort as abort:
             result["result"] = abort.result
             result["detail"] = abort.detail
@@ -357,6 +448,30 @@ def pick_to_tray(arm, poses, pan_deg=0.0, roll_deg=0.0, policy=None, speed_deg_s
     if notes:
         result["detail"] = "; ".join(filter(None, [result["detail"], *notes]))
     return result
+
+
+def pick_to_hand(arm, poses, pan_deg=0.0, roll_deg=0.0, policy=None, speed_deg_s=45,
+                 handoff_timeout_s=60, stop_event: threading.Event | None = None, on_state=None,
+                 log=None) -> dict:
+    """Pick the object at the parking spot, present it and wait for the person to take it.
+    See the module docstring. Needs the `present` pose (not `above_tray`).
+    stop_event: set it from another thread to stop; the arm holds where it is, still squeezing.
+    on_state(state) is called with "pick", "present" and "wait_for_take".
+    policy may be a checkpoint folder: its webcams are opened here and closed at the end."""
+    if not (_is_number(handoff_timeout_s) and handoff_timeout_s > 0):
+        raise ValueError(f"handoff_timeout_s must be a positive number of seconds, got {handoff_timeout_s!r}")
+    on_state = on_state or (lambda state: None)
+    sequence = functools.partial(_Picker.run_hand, timeout_s=handoff_timeout_s, on_state=on_state)
+    return _pick("hand", sequence, arm, poses, pan_deg, roll_deg, policy, speed_deg_s, stop_event, log)
+
+
+def pick_to_tray(arm, poses, pan_deg=0.0, roll_deg=0.0, policy=None, speed_deg_s=45,
+                 stop_event: threading.Event | None = None, log=None) -> dict:
+    """Pick the object at the parking spot and drop it in the tray (stretch). See the module
+    docstring. Needs the `above_tray` pose (not `present`).
+    stop_event: set it from another thread to stop; the arm holds where it is.
+    policy may be a checkpoint folder: its webcams are opened here and closed at the end."""
+    return _pick("tray", _Picker.run_tray, arm, poses, pan_deg, roll_deg, policy, speed_deg_s, stop_event, log)
 
 
 # --- configuration -----------------------------------------------------------
@@ -399,6 +514,22 @@ def load_arm_config(path: str | Path = DEFAULT_CONFIG_PATH,
         raise ConfigError(f"{path}: arm.move_speed_deg_s is {arm['move_speed_deg_s']:g}, above the "
                           f"{MAX_SPEED_DEG_S:g} deg/s arm limit (plan section 17)")
     return arm
+
+
+def load_handoff_timeout(path: str | Path = DEFAULT_CONFIG_PATH) -> float:
+    """robot.yaml handoff.timeout_s: seconds holding at the present pose before giving up.
+    It must be a positive number (no default). Raises ConfigError."""
+    path = Path(path)
+    if not path.exists():
+        raise ConfigError(f"{path} not found; robot.yaml comes from task S6 (plan section 9.1)")
+    cfg = _load_config(path)
+    handoff = cfg.get("handoff") if isinstance(cfg, dict) else None
+    if not isinstance(handoff, dict):
+        raise ConfigError(f"{path}: the 'handoff:' section is missing or empty (it needs handoff.timeout_s)")
+    value = handoff.get("timeout_s")
+    if not _is_number(value) or value <= 0:
+        raise ConfigError(f"{path}: handoff.timeout_s must be a positive number of seconds, got {value!r}")
+    return float(value)
 
 
 def load_camera_indices(path: str | Path, names: list[str]) -> dict:
@@ -464,13 +595,19 @@ def _size(text: str) -> tuple[int, int]:
 def _build_parser() -> argparse.ArgumentParser:
     parser = _Parser(prog="python -m arm.pick")
     sub = parser.add_subparsers(dest="cmd", required=True)
-    run = sub.add_parser("run", help="pick the object at the parking spot into the tray")
+    run = sub.add_parser("run", help="pick the object at the parking spot and hand it to the person "
+                                     "(or, --to tray, drop it in the tray)")
+    run.add_argument("--to", choices=("hand", "tray"), default="hand",
+                     help="hand: present it and wait for the take (default); tray: stretch tray mode")
     run.add_argument("--policy", help="ACT checkpoint folder (pretrained_model)")
     run.add_argument("--pan", type=float, default=0.0, help="shoulder_pan offset, deg")
     run.add_argument("--roll", type=float, default=0.0, help="wrist_roll offset, deg")
     run.add_argument("--speed", type=float,
                      help="deg/s, at most robot.yaml arm.move_speed_deg_s (the default); "
                           "first real runs: 25")
+    run.add_argument("--handoff-timeout", type=float, metavar="S",
+                     help="hand mode: seconds to hold at the present pose before giving up "
+                          "(default: robot.yaml handoff.timeout_s)")
     run.add_argument("--dry-run", action="store_true", help="simulated arm, no hardware")
     run.add_argument("--camera-size", type=_size, metavar="WxH",
                      help="with --policy: webcam capture size, if a webcam can't deliver the checkpoint's "
@@ -481,6 +618,10 @@ def _build_parser() -> argparse.ArgumentParser:
     run.add_argument("--sim-slip", action="store_true", help="dry run: object slips out while lifting")
     run.add_argument("--sim-stall", metavar="JOINT", choices=ARM_JOINTS,
                      help="dry run: this joint doesn't move (one of %(choices)s)")
+    run.add_argument("--sim-take-after", type=float, default=2.0, metavar="S",
+                     help="dry run: the person takes the object S s after it is presented (default 2; "
+                          "under TAKE_SETTLE_S = 1 s it reads as a slip)")
+    run.add_argument("--sim-never-take", action="store_true", help="dry run: nobody takes the object")
     return parser
 
 
@@ -495,8 +636,11 @@ def _finish(result: dict) -> int:
 
 def main(argv=None) -> int:
     argv = sys.argv[1:] if argv is None else list(argv)
+    parser = _build_parser()
     try:
-        args = _build_parser().parse_args(argv)
+        args = parser.parse_args(argv)
+        if args.to == "tray" and args.handoff_timeout is not None:
+            parser.error("--handoff-timeout only applies to --to hand")
     except _ArgError as e:
         policy_given = any(a == "--policy" or a.startswith("--policy=") for a in argv)
         return _finish(_error_result(str(e), "policy" if policy_given else "scripted"))
@@ -517,11 +661,18 @@ def main(argv=None) -> int:
         for flag, value in (("--pan", args.pan), ("--roll", args.roll)):   # before any hardware opens
             if not _is_number(value):
                 raise ValueError(f"{flag} must be a finite number, got {value!r}")
+        timeout = None
+        if args.to == "hand":
+            timeout = args.handoff_timeout
+            if timeout is None:
+                timeout = load_handoff_timeout(args.config)
+            elif not (_is_number(timeout) and timeout > 0):
+                raise ValueError(f"--handoff-timeout must be a positive number of seconds, got {timeout!r}")
         if args.dry_run:
             from .sim import DEFAULT_POSES, SimArm
-            poses = poses_mod.load(args.poses) if args.poses.exists() else DEFAULT_POSES
+            poses = poses_mod.load(args.poses, args.to) if args.poses.exists() else DEFAULT_POSES
         else:
-            poses = poses_mod.load(args.poses)
+            poses = poses_mod.load(args.poses, args.to)     # a pose this mode needs is missing: stop here
         policy = None
         if args.policy:     # before the arm opens; a dry run uses grey frames instead of webcams
             policy = load_policy(args.policy, config_path=args.config, capture_size=args.camera_size,
@@ -529,13 +680,19 @@ def main(argv=None) -> int:
             cameras = policy.cameras
         if args.dry_run:
             arm = SimArm(poses, miss_first=args.sim_miss, slip_on_lift=args.sim_slip,
-                         stall_joint=args.sim_stall)
+                         stall_joint=args.sim_stall, take_after_s=args.sim_take_after,
+                         never_take=args.sim_never_take)
         else:
             from .real import RealArm
             arm = RealArm(port=cfg["follower_port"], robot_id=cfg["follower_id"],
                           max_relative_target=cfg["max_relative_target_deg"])
-        result = pick_to_tray(arm, poses, pan_deg=args.pan, roll_deg=args.roll, policy=policy,
-                              speed_deg_s=speed, stop_event=stop_event, log=log)
+        if args.to == "hand":
+            result = pick_to_hand(arm, poses, pan_deg=args.pan, roll_deg=args.roll, policy=policy,
+                                  speed_deg_s=speed, handoff_timeout_s=timeout, stop_event=stop_event,
+                                  on_state=lambda state: log(f"state {state}"), log=log)
+        else:
+            result = pick_to_tray(arm, poses, pan_deg=args.pan, roll_deg=args.roll, policy=policy,
+                                  speed_deg_s=speed, stop_event=stop_event, log=log)
     except KeyboardInterrupt:     # only before the STOP handlers are in place
         result = {**_error_result("interrupted", grasp), "result": "stopped"}
     except Exception as e:  # noqa: BLE001 - any failure must still end in a RESULT line

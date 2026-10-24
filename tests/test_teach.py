@@ -12,7 +12,8 @@ import arm.real as real_mod
 import arm.teach as teach_mod
 from arm import pick, poses as poses_mod
 from arm.sim import DEFAULT_POSES, SimArm, SimLeader
-from arm.teach import STEPS, TeachError, dry_run_targets, save_with_backup, scripted_waiter, teach
+from arm.teach import (STEPS, TeachError, dry_run_targets, save_with_backup, scripted_waiter, teach,
+                       teach_steps)
 
 QUIET = lambda msg: None  # noqa: E731
 
@@ -42,12 +43,14 @@ def write_config(tmp_path, **arm_overrides):
     return path
 
 
-def scripted(leader, follower, poses=DEFAULT_POSES):
-    return scripted_waiter(leader, follower, dry_run_targets(poses))
+def scripted(leader, follower, poses=DEFAULT_POSES, with_tray=False):
+    return scripted_waiter(leader, follower, dry_run_targets(poses, with_tray))
 
 
-def assert_matches_default(taught):
-    for name in poses_mod.POSE_NAMES:
+def assert_matches_default(taught, with_tray=False):
+    names = [name for name in poses_mod.POSE_NAMES if name in taught]
+    assert names == ["ready", "above_object", "at_object", "lift", "present"] + (["above_tray"] if with_tray else [])
+    for name in names:
         for j in poses_mod.JOINTS:
             assert abs(taught[name][j] - DEFAULT_POSES[name][j]) < 0.5, (name, j)
     assert abs(taught["gripper_open"] - DEFAULT_POSES["gripper_open"]) < 0.5
@@ -86,8 +89,52 @@ def test_teach_records_every_pose_and_saves(tmp_path):
     save_with_backup(taught, out)
     reloaded = poses_mod.load(out)
     assert reloaded["at_object"] == taught["at_object"]
-    # the taught poses drive a clean simulated pick
+    # the taught poses drive a clean simulated pick and hand-off
+    assert pick.pick_to_hand(SimArm(reloaded), reloaded)["result"] == "taken"
+
+
+# --- A7: present is taught after lift; above_tray only with --with-tray ----------
+
+def test_steps_teach_present_right_after_lift_and_no_tray():
+    names = [name for name, _ in STEPS]
+    assert names == ["ready", "above_object", "at_object", "lift", "present", "gripper_open", "gripper_closed"]
+    assert [name for name, _ in teach_steps(with_tray=True)] == [
+        "ready", "above_object", "at_object", "lift", "present", "above_tray", "gripper_open", "gripper_closed"]
+
+
+def test_teach_without_tray_is_refused_by_tray_mode(tmp_path):
+    leader, follower = SimLeader(), SimArm()
+    taught = teach(leader, follower, speed_deg_s=45, wait_for=scripted(leader, follower), log=QUIET)
+    assert "present" in taught and "above_tray" not in taught
+    poses_mod.save(taught, tmp_path / "poses.json")
+    reloaded = poses_mod.load(tmp_path / "poses.json")
+    assert "above_tray" not in reloaded
+    with pytest.raises(poses_mod.PosesError, match="above_tray.*--with-tray"):
+        pick.pick_to_tray(SimArm(reloaded), reloaded)
+
+
+def test_teach_with_tray_records_above_tray_too(tmp_path):
+    leader, follower = SimLeader(), SimArm()
+    asked = []
+    script = scripted(leader, follower, with_tray=True)
+    taught = teach(leader, follower, speed_deg_s=45, log=QUIET, with_tray=True,
+                   wait_for=lambda step, prompt: asked.append(step) or script(step, prompt))
+    assert asked == [name for name, _ in teach_steps(with_tray=True)]
+    assert_matches_default(taught, with_tray=True)
+    poses_mod.save(taught, tmp_path / "poses.json")
+    reloaded = poses_mod.load(tmp_path / "poses.json")
     assert pick.pick_to_tray(SimArm(reloaded), reloaded)["result"] == "in_tray"
+    assert pick.pick_to_hand(SimArm(reloaded), reloaded)["result"] == "taken"
+
+
+def test_cli_dry_run_with_tray(tmp_path, capsys, default_poses_path, scratch_tmp):
+    before = default_poses_path.read_bytes()
+    rc = teach_mod.main(["--dry-run", "--with-tray", "--config", str(write_config(tmp_path))])
+    assert rc == 0, capsys.readouterr()
+    assert default_poses_path.read_bytes() == before            # config/poses.json untouched
+    written = list(scratch_tmp.glob("arm-teach-dry-run-*/poses.json"))
+    assert len(written) == 1
+    assert_matches_default(poses_mod.load(written[0]), with_tray=True)
 
 
 def test_teach_follower_is_speed_capped():
@@ -139,20 +186,21 @@ def test_unmoved_pose_is_not_recorded_and_the_step_is_asked_again():
 
     logs = []
     taught = teach(leader, follower, speed_deg_s=45, wait_for=wait_for, log=logs.append)
-    assert asked == ["ready", "above_object", "at_object", "at_object", "lift", "above_tray",
+    assert asked == ["ready", "above_object", "at_object", "at_object", "lift", "present",
                      "gripper_open", "gripper_closed"]
     assert any("at_object is within" in m and "above_object" in m for m in logs)
     assert_matches_default(taught)
 
 
-def test_claw_steps_may_repeat_the_tray_pose():
+@pytest.mark.parametrize("with_tray, last", [(False, "present"), (True, "above_tray")])
+def test_claw_steps_may_repeat_the_last_pose(with_tray, last):
     """gripper_open / gripper_closed only change the claw, so they are not 'unmoved'."""
     poses = json.loads(json.dumps(DEFAULT_POSES))
-    poses["above_tray"]["gripper"] = poses["gripper_open"]      # claw already open over the tray
+    poses[last]["gripper"] = poses["gripper_open"]      # claw already open at the last pose
     leader, follower = SimLeader(), SimArm()
     logs = []
-    taught = teach(leader, follower, speed_deg_s=45, wait_for=scripted(leader, follower, poses),
-                   log=logs.append)
+    taught = teach(leader, follower, speed_deg_s=45, wait_for=scripted(leader, follower, poses, with_tray),
+                   log=logs.append, with_tray=with_tray)
     assert not any("within" in m for m in logs)
     assert abs(taught["gripper_open"] - poses["gripper_open"]) < 0.5
 

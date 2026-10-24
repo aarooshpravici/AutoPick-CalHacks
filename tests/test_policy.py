@@ -21,6 +21,7 @@ ROBOT_YAML = {
             "follower_id": "so101_follower_arm", "leader_id": "so101_leader_arm",
             "max_relative_target_deg": 10, "move_speed_deg_s": 45},
     "cameras": {"wrist": 1, "scene": 2, "mast_top": 3},
+    "handoff": {"timeout_s": 60},
 }
 
 
@@ -558,5 +559,5 @@ def test_cli_real_policy_mode_closes_cameras(fakes, tmp_path, capsys, monkeypatc
         assert (rc, result["result"]) == (1, "error")
         assert "no such port" in result["detail"]
     else:
-        assert (rc, result["result"]) == (0, "in_tray")
+        assert (rc, result["result"]) == (0, "taken")      # hand mode is the default (A7)
     assert len(opened()) == 2 and sorted(closed()) == [("close", 1), ("close", 2)]
