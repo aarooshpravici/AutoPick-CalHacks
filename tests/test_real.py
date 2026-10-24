@@ -95,6 +95,9 @@ class FakeFollower:
         return obs
 
     def send_action(self, action):
+        cap = self.config.max_relative_target    # like LeRobot's ensure_safe_goal_position
+        if cap is not None and not isinstance(cap, (float, dict)):
+            raise TypeError(cap)
         self.actions.append(dict(action))
         return action
 
@@ -217,3 +220,10 @@ def test_gives_up_after_five_failed_handshakes_without_enabling_torque(new_layou
     with pytest.raises(RuntimeError, match="not answering after 5 tries"):
         RealArm("/dev/ttyFAKE", "so101_follower_arm", 10)
     assert ("enable", None) not in FakeFollower.instances[-1].bus.log
+
+
+def test_an_integer_step_cap_from_robot_yaml_is_passed_as_a_float(new_layout):
+    """robot.yaml's `max_relative_target_deg: 10` loads as int; LeRobot raises TypeError(10) on it."""
+    arm = RealArm("/dev/ttyFAKE", "so101_follower_arm", 10)
+    assert isinstance(FakeFollower.instances[-1].config.max_relative_target, float)
+    arm.command({j: 0.0 for j in JOINTS})                  # the first command no longer raises
