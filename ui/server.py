@@ -9,6 +9,8 @@
 |-----------------|-------------------------------------------------------------------|
 | GET  /          | The page: text box, big STOP button, current state, thumbnails    |
 | POST /request   | {"text": "...", "hand": "seated"|"standing"}: parsed, sent on     |
+|                 | + "clarify": true, "dialog": [{"question", "answer"}], hand ""   |
+|                 | allowed: may answer {"parsed": {"action": "ask", ...}} instead    |
 | POST /stop      | Stop everything                                                   |
 | GET  /status    | Brain state, last detection, last pick; lift and tray (null: none) |
 | GET  /thumb/{n} | Latest JPEG from camera n, if the brain provides one              |
@@ -18,8 +20,9 @@ The brain is anything that follows the `Brain` protocol below.
 STOP never waits on the parser, the network or the worker threads:
 - /stop is an async route, so it runs on the event loop and calls brain.stop()
   at once even when every worker thread is busy with slow parses or status calls.
-- "stop" typed in the box is caught by the keyword check before the hand is
-  checked or the parser runs, also on the event loop.
+- "stop" typed in the box, or in any answer to a question, is caught by the
+  keyword check before the hand is checked or the parser runs, also on the
+  event loop.
 - A request still being parsed when STOP arrives is dropped, never started.
 - Shutting the server down calls brain.stop().
 """
@@ -43,7 +46,7 @@ from pydantic import BaseModel
 
 from . import request as request_mod
 
-HANDS = ("seated", "standing")
+HANDS = request_mod.HANDS
 STATUS_FIELDS = ("state", "item", "message", "detection", "lift_mm", "tray_g", "last_pick", "cameras", "t")
 
 
@@ -115,9 +118,16 @@ class Brain(Protocol):
         ...
 
 
+class Turn(BaseModel):
+    question: str
+    answer: str
+
+
 class RequestBody(BaseModel):
     text: str
     hand: Any = "seated"      # checked by hand after the STOP check, so "stop" always wins
+    clarify: bool = False     # True: the robot may ask questions first; hand may then be "" or None
+    dialog: list[Turn] = []   # questions already asked for this request and the answers, oldest first
 
 
 class _StopCount:
@@ -137,7 +147,7 @@ class _StopCount:
             return self._n
 
 
-def create_app(brain: Brain, parse=request_mod.parse_request) -> FastAPI:
+def create_app(brain: Brain, parse=request_mod.parse_request, clarify=request_mod.clarify_request) -> FastAPI:
     stops = _StopCount()
 
     def stop_now() -> None:
@@ -166,19 +176,30 @@ def create_app(brain: Brain, parse=request_mod.parse_request) -> FastAPI:
 
     @app.post("/request")
     async def post_request(body: RequestBody):
-        if request_mod.is_stop(body.text):            # stop wins, before the hand check or the parser
+        # stop wins, before the hand check, the dialog check or the parser
+        if any(request_mod.is_stop(t) for t in (body.text, *(turn.answer for turn in body.dialog))):
             stop_now()
             return {"parsed": {"action": "stop", "item": None}}
-        if body.hand not in HANDS:
+        if len(body.dialog) > request_mod.MAX_QUESTIONS:
+            raise HTTPException(422, f"at most {request_mod.MAX_QUESTIONS} questions per request")
+        if body.hand not in HANDS and not (body.clarify and body.hand in ("", None)):
             raise HTTPException(422, f"hand must be one of {HANDS}")
         seen = stops.value
-        parsed = await run_in_threadpool(parse, body.text)    # may take seconds (Claude API)
+        if body.clarify:
+            dialog = [turn.model_dump() for turn in body.dialog]
+            parsed = await run_in_threadpool(clarify, body.text, dialog, body.hand or None)
+            if parsed["action"] == "ask":              # nothing moves until the person has answered
+                return {"parsed": parsed}
+            hand = parsed["hand"]
+        else:
+            parsed = await run_in_threadpool(parse, body.text)    # may take seconds (Claude API)
+            hand = body.hand
         if parsed["action"] == "stop":
             stop_now()
         elif parsed["action"] == "fetch":
             if stops.value != seen:                    # STOP arrived while parsing
                 return {"parsed": parsed, "dropped": "stopped"}
-            await run_in_threadpool(brain.request, parsed["item"], body.hand)
+            await run_in_threadpool(brain.request, parsed["item"], hand)
             if stops.value != seen:                    # STOP raced with request(): make sure it wins
                 brain.stop()
                 return {"parsed": parsed, "dropped": "stopped"}
@@ -322,6 +343,19 @@ PAGE = """<!doctype html>
   #thumbs { display:flex; gap:8px; flex-wrap:wrap; } #thumbs img { width:150px; border-radius:8px; }
   #reply { color:var(--muted); min-height:1.4em; }
   .stale #state::after { content:" (no connection)"; font-size:16px; color:var(--stop); }
+  /* clarifying questions */
+  #question { margin-top:12px; font-size:20px; font-weight:600; }
+  #question[hidden] { display:none; }
+  #question small { display:block; color:var(--muted); font-size:13px; font-weight:400; }
+  #opts { display:flex; gap:8px; flex-wrap:wrap; margin-top:8px; }
+  button.opt { min-height:48px; min-width:48px; padding:10px 18px; font:inherit; font-size:18px; font-weight:600;
+               border-radius:10px; border:2px solid var(--go); background:var(--card); color:var(--ink); cursor:pointer; }
+  button.opt[aria-disabled="true"] { opacity:.45; cursor:wait; }
+  #cancel { min-height:44px; padding:8px 14px; font:inherit; font-size:15px; border-radius:10px;
+            border:1px solid var(--line); background:var(--bg); color:var(--muted); cursor:pointer; }
+  #cancel[hidden] { display:none; }
+  #setting { display:flex; align-items:center; gap:8px; margin-top:10px; color:var(--muted); min-height:44px; }
+  #setting input { width:22px; height:22px; }
 </style></head>
 <body><main>
   <h1>FLOOR PICKER</h1>
@@ -340,9 +374,13 @@ PAGE = """<!doctype html>
   <section class="card">
     <form id="ask">
       <input id="text" autocomplete="off" placeholder="I dropped my phone">
-      <select id="hand" aria-label="Hand height"><option value="seated">Seated</option><option value="standing">Standing</option></select>
+      <select id="hand" aria-label="Hand height"><option value="">Ask me</option><option value="seated">Seated</option><option value="standing">Standing</option></select>
       <button class="go" id="go" type="submit" aria-disabled="false">Ask</button>
     </form>
+    <label id="setting"><input type="checkbox" id="clarify" checked> Ask me questions first</label>
+    <div id="question" role="status" aria-live="polite" hidden></div>
+    <div id="opts"></div>
+    <button id="cancel" type="button" hidden>Cancel</button>
     <div id="reply"></div>
   </section>
   <section class="card">
@@ -381,10 +419,50 @@ async function call(url, opts, ms) {
 const why = e => e.name === "AbortError" ? "no answer in time" : "no connection";
 
 let stopFailing = false, stopRetry = null, asking = false;
+// The questions in progress: the original request, the answers so far, the question on screen.
+let convo = {text: "", dialog: [], pending: null};
+const MAX_QUESTIONS = __MAX_QUESTIONS__;      // the server enforces it too
 function setAskBusy() { $("go").setAttribute("aria-disabled", String(asking || stopFailing)); }
+
+function showQuestion() {
+  const q = $("question"), pending = convo.pending;
+  q.hidden = pending === null;
+  q.textContent = pending === null ? "" : pending;
+  $("opts").innerHTML = "";
+  $("cancel").hidden = pending === null;
+  $("text").placeholder = pending === null ? "I dropped my phone" : "Your answer";
+  if (pending === null) return;
+  const n = document.createElement("small");
+  n.textContent = `Question ${convo.dialog.length + 1} of up to ${MAX_QUESTIONS}`;
+  q.append(n);
+  for (const o of convo.options || []) {
+    const b = document.createElement("button");
+    b.type = "button"; b.className = "opt"; b.textContent = o;
+    b.addEventListener("click", () => send(o));
+    $("opts").append(b);
+  }
+}
+function endConversation() {
+  convo = {text: "", dialog: [], pending: null};
+  showQuestion();
+}
+$("cancel").addEventListener("click", () => { endConversation(); $("reply").textContent = "Cancelled"; });
+
+// The "Ask me questions first" setting; the page works without localStorage.
+let handTouched = false;
+try { const v = localStorage.getItem("clarify"); if (v !== null) $("clarify").checked = v === "1"; } catch (e) {}
+const syncHand = () => { if (!handTouched) $("hand").value = $("clarify").checked ? "" : "seated"; };
+syncHand();
+$("hand").addEventListener("change", () => { handTouched = true; });
+$("clarify").addEventListener("change", () => {
+  try { localStorage.setItem("clarify", $("clarify").checked ? "1" : "0"); } catch (e) {}
+  syncHand();
+  endConversation();
+});
 
 async function stop() {
   clearTimeout(stopRetry);
+  endConversation();
   $("state").textContent = "Stopping…";
   let problem;
   try {
@@ -403,9 +481,14 @@ async function stop() {
 $("stop").addEventListener("click", stop);
 document.addEventListener("keydown", e => { if (e.key === "Escape") stop(); });
 
-$("ask").addEventListener("submit", async e => {
+$("ask").addEventListener("submit", e => {
   e.preventDefault();
-  const text = $("text").value.trim(); if (!text) return;
+  return send($("text").value);
+});
+
+// Send the box text (or a tapped option): a new request, or the answer to the pending question.
+async function send(raw) {
+  const text = raw.trim(); if (!text) return;
   if (STOP_WORDS.test(text)) {           // typed stop goes straight to /stop, even mid-request
     $("text").value = ""; $("reply").textContent = "Stopping";
     stop();
@@ -413,24 +496,38 @@ $("ask").addEventListener("submit", async e => {
   }
   if (stopFailing) { $("reply").textContent = "STOP has not gone through yet."; return; }
   if (asking) return;
+  const clarify = $("clarify").checked;
+  const answering = clarify && convo.pending !== null;      // else this starts a new request
+  const sent = answering ? {text: convo.text, dialog: [...convo.dialog, {question: convo.pending, answer: text}]}
+                         : {text, dialog: []};
+  const hand = $("hand").value;
+  const payload = clarify ? {text: sent.text, hand, clarify: true, dialog: sent.dialog}
+                          : {text: sent.text, hand: hand || "seated"};
   asking = true; setAskBusy(); $("reply").textContent = "…";
   try {
     const r = await call("/request", {method: "POST", headers: {"Content-Type": "application/json"},
-                                      body: JSON.stringify({text, hand: $("hand").value})}, 30000);
+                                      body: JSON.stringify(payload)}, 30000);
     if (!r.ok || !r.body || !r.body.parsed) {
       const detail = r.body && typeof r.body.detail === "string" ? `: ${r.body.detail}` : "";
       $("reply").textContent = `Not done (server error ${r.status}${detail})`;
     } else {
       const p = r.body.parsed;
-      $("reply").textContent = r.body.dropped ? "Cancelled: STOP was pressed"
-                             : p.action === "fetch" ? `Fetching: ${label(p.item)}`
-                             : p.action === "stop" ? "Stopped" : "I can't fetch that one.";
+      if (p.action === "ask") {
+        convo = {...sent, pending: p.question, options: p.options};
+        showQuestion();
+        $("reply").textContent = "";
+      } else {
+        endConversation();
+        $("reply").textContent = r.body.dropped ? "Cancelled: STOP was pressed"
+                               : p.action === "fetch" ? `Fetching: ${label(p.item)}${p.hand ? ` (${p.hand})` : ""}`
+                               : p.action === "stop" ? "Stopped" : "I can't fetch that one.";
+      }
       $("text").value = "";
     }
   } catch (e) { $("reply").textContent = `Not sent (${why(e)})`; }
   finally { asking = false; setAskBusy(); }
   refresh();
-});
+}
 
 let shown = "", refreshing = false;
 async function refresh() {
@@ -472,7 +569,8 @@ async function refresh() {
 }
 setInterval(refresh, 500); refresh();
 </script></body></html>
-""".replace("__STOP_PATTERN__", json.dumps(request_mod.STOP_WORDS.pattern))
+""".replace("__STOP_PATTERN__", json.dumps(request_mod.STOP_WORDS.pattern)).replace(
+    "__MAX_QUESTIONS__", str(request_mod.MAX_QUESTIONS))
 
 
 def load_config(path: Path) -> dict | None:
