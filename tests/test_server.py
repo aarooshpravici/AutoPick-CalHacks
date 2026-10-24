@@ -334,13 +334,91 @@ def test_stop_is_fast_while_every_worker_thread_is_busy():
 
 # --- FakeBrain -------------------------------------------------------------------
 
-def test_fakebrain_reads_hand_heights_and_reports_pick_detail():
-    b = FakeBrain(lift={"seated_hand_mm": 650, "standing_hand_mm": 1050, "taken_weight_drop_g": 50})
-    b.request("phone", "standing")
-    b._started -= 2 + 3 + 4 + 2 + 0.5           # into WaitForTake
+HANDOFF = [("Search", "Looking for: phone"), ("Approach", "Driving to the phone"),
+           ("Pick", "Picking it up"), ("Present", "Holding it up for you"),
+           ("WaitForTake", "Take your phone from the claw")]
+
+
+def fake_at(item="phone", seconds=0.0, hand="seated"):
+    """A FakeBrain `seconds` into a request."""
+    b = FakeBrain()
+    b.request(item, hand)
+    b._started -= seconds
+    return b
+
+
+def test_fakebrain_walks_the_handoff_states():
+    assert [state for state, _ in FakeBrain.STEPS] == [state for state, _ in HANDOFF]    # no Raise, no Lower
+    b = FakeBrain()
+    assert b.status()["state"] == "Idle"
+    b.request("phone", "seated")
+    spent = 0.0
+    for (state, message), (_, seconds) in zip(HANDOFF, FakeBrain.STEPS):
+        b._started = time.monotonic() - (spent + 0.5)            # half a second into this state
+        s = b.status()
+        assert (s["state"], s["message"]) == (state, message)
+        spent += seconds
+    b._started = time.monotonic() - (spent + 0.5)
     s = b.status()
-    assert s["state"] == "WaitForTake" and s["lift_mm"] == 1050
+    assert (s["state"], s["message"]) == ("Idle", "Done")
+    assert b.status()["state"] == "Idle"                         # and stays there
+
+
+def test_fakebrain_messages_use_plain_item_names():
+    s = fake_at("pill_bottle", 2 + 3 + 4 + 2 + 0.5).status()
+    assert s["state"] == "WaitForTake" and s["message"] == "Take your pill bottle from the claw"
+    assert fake_at("pill_bottle").status()["message"] == "Looking for: pill bottle"
+
+
+def test_fakebrain_has_no_lift_or_tray():
+    b = FakeBrain(lift={"seated_hand_mm": 650, "standing_hand_mm": 1050})    # a robot.yaml lift section is ignored
+    b.request("phone", "standing")
+    spent = 0.0
+    for state, seconds in FakeBrain.STEPS + [("Idle", 1.0)]:
+        b._started = time.monotonic() - (spent + 0.5)
+        s = b.status()
+        assert s["state"] == state and s["lift_mm"] is None and s["tray_g"] is None
+        spent += seconds
+
+
+def test_status_json_has_null_lift_and_tray(client):
+    client.post("/request", json={"text": "I dropped my phone"})
+    raw = client.get("/status").text
+    s = json.loads(raw)
+    assert s["lift_mm"] is None and s["tray_g"] is None
+    assert '"lift_mm":null' in raw.replace(" ", "") and '"tray_g":null' in raw.replace(" ", "")
+
+
+def test_fakebrain_last_pick_is_a_pick_to_hand_result_once_taken():
+    b = fake_at("phone", 2 + 3 + 4 + 2 + 0.5)                    # in WaitForTake: not taken yet
+    assert b.status()["last_pick"] is None
+    b._started -= 4
+    s = b.status()
+    assert s["state"] == "Idle"
     assert set(s["last_pick"]) == {"result", "grasp", "attempts", "seconds", "detail"}     # plan 9.4
+    assert s["last_pick"]["result"] == "taken" and s["last_pick"]["grasp"] == "scripted"
+    b.request("pen", "seated")
+    assert b.status()["last_pick"] is None                       # a new request clears it
+
+
+def test_fakebrain_stop_still_stops_mid_handoff():
+    b = fake_at("phone", 2 + 3 + 4 + 0.5, hand="standing")       # Present
+    assert b.status()["state"] == "Present"
+    b.stop()
+    b.stop()                                                     # idempotent
+    s = b.status()
+    assert (s["state"], s["message"], s["last_pick"]) == ("Stopped", "Stopped", None)
+    b._started = None
+    assert b.status()["state"] == "Stopped"                      # time does not move it on
+    b.request("phone", "seated")
+    assert b.status()["state"] == "Search"                       # until the next request
+
+
+def test_page_shows_no_tray_flow():
+    for old in ("Raise", "Lower"):
+        assert old not in PAGE and old not in [state for state, _ in FakeBrain.STEPS]
+    assert 'id="liftrow" hidden' in PAGE and 'id="trayrow" hidden' in PAGE     # hidden until there is a value
+    assert 'id="stop"' in PAGE and 'id="stopfail"' in PAGE
 
 
 # --- the page's script (run in node against a stub DOM, if node is installed) --
@@ -365,6 +443,10 @@ def test_page_uses_the_parsers_stop_words():
     "dropped_request_is_reported",
     "only_one_status_request_at_a_time",
     "hung_status_times_out_and_shows_no_connection",
+    "lift_and_tray_rows_are_hidden_when_null",
+    "lift_and_tray_rows_show_when_there_are_numbers",
+    "wait_for_take_is_prominent",
+    "handoff_steps_follow_the_state",
 ])
 def test_page_script(tmp_path, scenario):
     script = tmp_path / "page.js"
@@ -416,7 +498,7 @@ def test_main_defaults_to_fakebrain_on_localhost(robot_yaml, no_uvicorn, no_inpu
     monkeypatch.setitem(sys.modules, "brain.mission", None)    # the real brain must not even be imported
     assert server.main(["--config", str(robot_yaml)]) == 0
     assert no_uvicorn["host"] == "127.0.0.1" and no_uvicorn["port"] == 8000
-    assert made[0]._hand_mm["seated"] == 650                    # read from robot.yaml
+    assert len(made) == 1
     assert made[0].calls == [("stop",)]                         # stopped when the server exits
     out = capsys.readouterr().out
     assert "http://127.0.0.1:8000" in out and "WARNING" not in out
