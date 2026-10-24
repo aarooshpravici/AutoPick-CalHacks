@@ -14,9 +14,14 @@ Hand-off (pick_to_hand): after the grasp the arm carries the object up to `lift`
 to `present` at no more than PRESENT_SPEED_DEG_S (a person is near, plan 17), and holds
 it there, still squeezing. When the person pulls it out, the claw closes fully: read on
 the closed side TAKE_READS times in a row (at TAKE_POLL_HZ), that is a take, and the
-arm opens the claw and goes back to `ready` ("taken"). If nobody takes it within
-handoff_timeout_s (robot.yaml handoff.timeout_s), the arm goes back to `lift`, still
-holding ("timeout"). The moves away from `present` run at the same lower speed.
+arm opens the claw and goes back to `ready` ("taken"). The person reaches only once
+the arm has stopped (plan 17), so a claw that starts closing within TAKE_SETTLE_S of
+arriving lost the object on its own ("dropped"), as does a claw that reads open for
+TAKE_READS reads in a row. A slip later than that looks exactly like a take (known
+limit, plan 10.7). If nobody takes it within handoff_timeout_s (robot.yaml
+handoff.timeout_s), the arm goes back to `lift`, still holding ("timeout"; "dropped"
+if the claw no longer holds it there). The moves away from `present` run at the same
+lower speed.
 on_state, if given, is called with "pick" at the start, "present" as the move to
 `present` starts and "wait_for_take" once the arm is there and still holding.
 
@@ -72,7 +77,8 @@ GRIP_STILL_DEG = 0.3            # policy mode: claw moved less than this since t
 MAX_SPEED_DEG_S = 45.0          # plan section 17 arm limit; robot.yaml move_speed_deg_s is the working ceiling
 PRESENT_SPEED_DEG_S = 25.0      # plan section 17: moves to and from `present` are near a person
 TAKE_POLL_HZ = 20               # claw reads while waiting for the take
-TAKE_READS = 3                  # closed-side reads in a row that count as taken
+TAKE_READS = 6                  # reads in a row (about 0.3 s) that decide a take or a drop
+TAKE_SETTLE_S = 1.0             # nobody reaches this soon after the arm stops: closing then is a slip
 DEFAULT_CONFIG_PATH = REPO_ROOT / "config" / "robot.yaml"
 
 EXIT_CODES = {"taken": 0, "in_tray": 0, "stopped": 1, "error": 1, "missed": 2, "dropped": 3, "stuck": 4,
@@ -256,25 +262,42 @@ class _Picker:
         stopped = self.set_grip(self.g_squeeze)
         return stopped and self.holding()
 
-    def wait_for_take(self, timeout_s: float) -> bool:
+    def wait_for_take(self, timeout_s: float) -> str:
         """Hold still at the present pose, still squeezing, and read the claw at TAKE_POLL_HZ.
-        True once it reads on the closed side TAKE_READS times in a row: the person pulled the
-        object out and the claw closed on nothing. False if timeout_s passes first."""
+        Returns "taken" once it reads on the closed side TAKE_READS times in a row (the person
+        pulled the object out and the claw closed on nothing), or "dropped" if that closing
+        began within TAKE_SETTLE_S of arriving (nobody had reached yet: it slipped out) or the
+        claw reads open TAKE_READS times in a row. "timeout" if timeout_s passes first."""
         self.log("wait for take")
         dt = 1.0 / TAKE_POLL_HZ
-        closed = 0
+        closed = opened = 0
+        closed_since = None
         t0 = self.clock.now()
-        while self.clock.now() - t0 < timeout_s:
+        while True:
+            now = self.clock.now()
+            if now - t0 >= timeout_s:
+                return "timeout"
             self._check_stop()
             # Re-send the carry target at every read: LeRobot caps each command's step
             # (max_relative_target), so one command alone would stop the claw short of closed.
             self._send(self.joint_cmd, self.g_squeeze)
-            closed = closed + 1 if self._closed_side(self.arm.read()["gripper"]) else 0
+            g = self.arm.read()["gripper"]
+            if self._closed_side(g):
+                closed_since = now if closed == 0 else closed_since
+                closed += 1
+            else:
+                closed = 0
+            opened = 0 if self._closed_side(g) or claw_holding(g, self.g_open, self.g_closed) else opened + 1
             if closed >= TAKE_READS:
+                if closed_since - t0 < TAKE_SETTLE_S:
+                    self.log("claw closed before anyone could reach: the object slipped out")
+                    return "dropped"
                 self.log("taken")
-                return True
+                return "taken"
+            if opened >= TAKE_READS:
+                self.log("claw reads open: the object fell")
+                return "dropped"
             self.clock.sleep(dt)
-        return False
 
     # --- sequence ------------------------------------------------------------
 
@@ -329,16 +352,18 @@ class _Picker:
         on_state("present")
         self.carry("present", speed=near_person)
         on_state("wait_for_take")
-        if self.wait_for_take(timeout_s):
+        outcome = self.wait_for_take(timeout_s)
+        if outcome == "dropped":
+            self._back_to_ready(near_person)
+            raise _Abort("dropped", "object slipped out at the present pose before anyone could take it")
+        if outcome == "taken":
             self.set_grip(self.g_open)
             self.move("ready", self.g_open, speed=near_person)
             result["detail"] = "taken at the present pose"
             return
-        self.move("lift", self.g_squeeze, speed=near_person)
+        self.carry("lift", speed=near_person)       # "timeout" promises it still holds (plan 9.4)
         result["result"] = "timeout"
         result["detail"] = f"not taken within {timeout_s:g} s; holding at lift"
-        if not self.holding():
-            result["detail"] += ", but the claw no longer holds the object"
 
 
 def close_cameras(cameras: dict) -> list[str]:
@@ -594,7 +619,8 @@ def _build_parser() -> argparse.ArgumentParser:
     run.add_argument("--sim-stall", metavar="JOINT", choices=ARM_JOINTS,
                      help="dry run: this joint doesn't move (one of %(choices)s)")
     run.add_argument("--sim-take-after", type=float, default=2.0, metavar="S",
-                     help="dry run: the person takes the object S s after it is presented (default 2)")
+                     help="dry run: the person takes the object S s after it is presented (default 2; "
+                          "under TAKE_SETTLE_S = 1 s it reads as a slip)")
     run.add_argument("--sim-never-take", action="store_true", help="dry run: nobody takes the object")
     return parser
 
@@ -610,8 +636,11 @@ def _finish(result: dict) -> int:
 
 def main(argv=None) -> int:
     argv = sys.argv[1:] if argv is None else list(argv)
+    parser = _build_parser()
     try:
-        args = _build_parser().parse_args(argv)
+        args = parser.parse_args(argv)
+        if args.to == "tray" and args.handoff_timeout is not None:
+            parser.error("--handoff-timeout only applies to --to hand")
     except _ArgError as e:
         policy_given = any(a == "--policy" or a.startswith("--policy=") for a in argv)
         return _finish(_error_result(str(e), "policy" if policy_given else "scripted"))

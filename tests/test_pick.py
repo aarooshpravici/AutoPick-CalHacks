@@ -553,29 +553,40 @@ def holding_still(arm):
             and arm.goal["gripper"] == SQUEEZE_TARGET)
 
 
-def watch_states(arm, stop_state=None, stop_after_ticks=None):
-    """An on_state that records (state, object, pose the arm is at, clock, commands sent so far).
-    With stop_state, the returned stop_event is set stop_after_ticks sleeps after that state
-    is reported, and stop.at is the clock then."""
+def stop_when(arm, condition, after_ticks=0):
+    """A stop_event set after_ticks sleeps after condition() first holds (checked after each
+    sleep); stop.at is the clock then."""
     stop = threading.Event()
-    seen = []
     ticks = {"n": None}
     sleep = arm.clock.sleep
 
     def sleep_then_stop(dt):
         sleep(dt)
-        if ticks["n"] is not None:
-            ticks["n"] += 1
-            if ticks["n"] == stop_after_ticks:
-                stop.at = arm.clock.now()
-                stop.set()
+        if stop.is_set():
+            return
+        if ticks["n"] is None:
+            if not condition():
+                return
+            ticks["n"] = 0
+        ticks["n"] += 1
+        if ticks["n"] >= after_ticks:
+            stop.at = arm.clock.now()
+            stop.set()
+
+    arm.clock.sleep = sleep_then_stop
+    return stop
+
+
+def watch_states(arm, stop_state=None, stop_after_ticks=None):
+    """An on_state that records (state, object, pose the arm is at, clock, commands sent so far).
+    With stop_state, the returned stop_event is set stop_after_ticks sleeps after that state
+    is reported, and stop.at is the clock then."""
+    seen = []
 
     def on_state(state):
         seen.append((state, arm.object, where(arm), arm.clock.now(), len(getattr(arm, "sent", []))))
-        if state == stop_state:
-            ticks["n"] = 0
 
-    arm.clock.sleep = sleep_then_stop
+    stop = stop_when(arm, lambda: stop_state in [s[0] for s in seen], stop_after_ticks or 0)
     return on_state, seen, stop
 
 
@@ -670,13 +681,14 @@ def test_drop_on_the_way_to_present():
 
 
 @pytest.mark.parametrize("speed, cap", [(45, 25), (25, 25), (10, 10)])
-@pytest.mark.parametrize("taker", [{}, {"never_take": True}])
-def test_moves_near_the_person_never_exceed_25_deg_s(speed, cap, taker):
+@pytest.mark.parametrize("taker, expected", [({}, "taken"), ({"never_take": True}, "timeout"),
+                                             ({"never_take": True, "slip_at_present_after_s": 0.5}, "dropped")])
+def test_moves_near_the_person_never_exceed_25_deg_s(speed, cap, taker, expected):
     """From the start of the move to present to the end (waiting, then back to ready or lift)."""
     arm = Recorder(**taker)
     marks = {}
     r = hand(arm, speed_deg_s=speed, handoff_timeout_s=3, on_state=lambda s: marks.setdefault(s, len(arm.sent)))
-    assert r["result"] == ("timeout" if taker else "taken")
+    assert r["result"] == expected
 
     def steps(sent):
         return [max(abs(b[j] - a[j]) for j in poses_mod.ARM_JOINTS) for a, b in zip(sent, sent[1:])]
@@ -696,29 +708,133 @@ def test_policy_grasp_then_handoff():
     assert arm.object == "hand" and where(arm) == "ready"
 
 
-class FlickeringClaw(SimArm):
-    """While waiting for the take, the claw reads fully closed 2 reads in every 4 (noise)."""
+class GlitchyClaw(SimArm):
+    """Nobody takes it. While waiting for the take, the claw reads `value` ("closed" or "open")
+    for `run` reads, then twice truly, over and over (run=None: for good)."""
 
-    def __init__(self, **kw):
+    def __init__(self, value, run, **kw):
         super().__init__(never_take=True, **kw)
+        self.value = self.poses["gripper_" + value]
+        self.run = run
         self.waiting = False
         self.reads = 0
 
     def read(self):
         pos = super().read()
-        if self.waiting and self._near("present"):
+        if self.waiting and self._arrived("present"):
             self.reads += 1
-            if self.reads % 4 in (1, 2):
-                pos["gripper"] = self.poses["gripper_closed"]
+            if self.run is None or 0 < self.reads % (self.run + 2) <= self.run:
+                pos["gripper"] = self.value
         return pos
 
 
-def test_take_needs_3_closed_reads_in_a_row():
-    arm = FlickeringClaw()
+@pytest.mark.parametrize("value", ["closed", "open"])
+def test_glitches_shorter_than_take_reads_are_ignored(value):
+    """5 reads in a row (a quarter of a second) is noise: neither a take nor a drop."""
+    arm = GlitchyClaw(value, 5)
     r = hand(arm, handoff_timeout_s=3, on_state=lambda s: setattr(arm, "waiting", s == "wait_for_take"))
-    assert r["result"] == "timeout"
+    assert r["result"] == "timeout", r["detail"]
     assert arm.reads >= 40                 # read at about 20 Hz for the 3 s
-    assert arm.object == "held"
+    assert arm.object == "held" and where(arm) == "lift"
+
+
+def test_claw_reading_open_while_waiting_is_dropped():
+    arm = GlitchyClaw("open", None)
+    r = hand(arm, on_state=lambda s: setattr(arm, "waiting", s == "wait_for_take"))
+    assert r["result"] == "dropped"
+    assert pick.TAKE_READS <= arm.reads <= pick.TAKE_READS + 15    # decided on the 6th read, then let go
+    assert where(arm) == "ready" and arm.goal["gripper"] == DEFAULT_POSES["gripper_open"]
+
+
+@pytest.mark.parametrize("slip_s", [0.0, 0.5])
+def test_slip_at_present_is_dropped_not_taken(slip_s):
+    """The person reaches only once the arm has stopped (plan 17): a claw closing within
+    TAKE_SETTLE_S of arriving lost the object on its own."""
+    arm = SimArm(never_take=True, slip_at_present_after_s=slip_s)
+    on_state, seen, _ = watch_states(arm)
+    r = hand(arm, on_state=on_state)
+    assert r["result"] == "dropped"
+    assert r["detail"] == "object slipped out at the present pose before anyone could take it"
+    assert [s[0] for s in seen] == ["pick", "present", "wait_for_take"]
+    assert arm.clock.now() - seen[-1][3] < pick.TAKE_SETTLE_S + 3.0 + 4.0   # no waiting out the timeout
+    assert arm.object == "floor"
+    assert where(arm) == "ready" and arm.goal["gripper"] == DEFAULT_POSES["gripper_open"]
+
+
+def test_slip_after_the_settle_window_looks_like_a_take():
+    """Known limit (plan 10.7): a slip later than TAKE_SETTLE_S closes the claw just as a take
+    does, so it is reported "taken" though nobody took it."""
+    arm = SimArm(never_take=True, slip_at_present_after_s=5.0)
+    r = hand(arm)
+    assert r["result"] == "taken"
+    assert arm.object == "floor"
+
+
+class SlipOnTheWayBackToLift(SimArm):
+    """Nobody takes it, and the object falls out as the arm leaves present after the timeout."""
+
+    def __init__(self, **kw):
+        super().__init__(never_take=True, **kw)
+        self.was_presented = False
+
+    def step(self, dt):
+        super().step(dt)
+        if self.presented_s > 0:
+            self.was_presented = True
+        elif self.object == "held" and self.was_presented:
+            self.object = "floor"
+            self._missing = True
+
+
+def test_timeout_with_nothing_left_in_the_claw_is_dropped():
+    """Plan 9.4: "timeout" means the arm is at lift, still holding."""
+    arm = SlipOnTheWayBackToLift()
+    r = hand(arm, handoff_timeout_s=3)
+    assert r["result"] == "dropped"
+    assert "lift" in r["detail"]
+    assert arm.object == "floor"
+    assert where(arm) == "ready" and arm.goal["gripper"] == DEFAULT_POSES["gripper_open"]
+
+
+@pytest.mark.parametrize("ticks, at", [(3, "present"), (40, None)])
+def test_stop_while_letting_go_after_a_take_holds(ticks, at):
+    """3 ticks: while the claw opens at present; 40: on the way back to ready."""
+    arm = SimArm()
+    letting_go = lambda: arm.object == "hand" and arm.goal["gripper"] == DEFAULT_POSES["gripper_open"]  # noqa: E731
+    stop = stop_when(arm, letting_go, ticks)
+    r = hand(arm, stop_event=stop)
+    assert r["result"] == "stopped"
+    assert arm.clock.now() - stop.at <= 0.5
+    assert all(arm.goal[j] == arm.pos[j] for j in poses_mod.ARM_JOINTS)
+    assert where(arm) == at
+
+
+def test_stop_on_the_way_back_to_lift_holds_and_keeps_squeezing():
+    arm = SimArm(never_take=True)
+    waited = {}
+    stop = stop_when(arm, lambda: "wait_for_take" in waited and arm.clock.now() >= waited["wait_for_take"] + 3.5)
+    r = hand(arm, handoff_timeout_s=3, stop_event=stop,
+             on_state=lambda s: waited.setdefault(s, arm.clock.now()))
+    assert r["result"] == "stopped"
+    assert arm.clock.now() - stop.at <= 0.5
+    assert where(arm) is None and arm.object == "held"      # between present and lift
+    assert holding_still(arm)
+
+
+def test_sim_take_timer_starts_once_the_arm_has_stopped_at_present():
+    arm = SimArm(take_after_s=0.0)
+    arm.object, arm.pos["gripper"] = "held", arm._object_stop      # holding it, squeezing
+    nearly = dict(DEFAULT_POSES["present"], elbow_flex=DEFAULT_POSES["present"]["elbow_flex"] + 3)
+    arm.pos.update({j: nearly[j] for j in poses_mod.ARM_JOINTS})
+    arm.command({**{j: nearly[j] for j in poses_mod.ARM_JOINTS}, "gripper": SQUEEZE_TARGET})
+    for _ in range(30):
+        arm.clock.sleep(0.05)            # within 5 deg of present, but not there
+    assert arm.object == "held" and arm.presented_s == 0
+    arm.command({j: DEFAULT_POSES["present"][j] for j in poses_mod.ARM_JOINTS})
+    arm.clock.sleep(0.05)
+    assert arm.object == "hand"
+    with pytest.raises(ValueError, match="slip_at_present_after_s"):
+        SimArm(slip_at_present_after_s=-1)
 
 
 def test_hand_mode_needs_present_before_any_motion():
@@ -766,6 +882,13 @@ def test_cli_hand_mode_dry_run(tmp_path, capsys, extra, result, code):
     assert set(r) == {"result", "grasp", "attempts", "seconds", "detail"}
     if result in ("taken", "timeout"):
         assert "state present" in out and "state wait_for_take" in out
+
+
+def test_cli_handoff_timeout_with_tray_is_an_argument_error(tmp_path, capsys, fake_real_arm):
+    rc, r, _ = run_cli(tmp_path, capsys, "--to", "tray", "--handoff-timeout", "30", "--poses", str(fake_real_arm))
+    assert (rc, r["result"]) == (1, "error")
+    assert "--handoff-timeout" in r["detail"] and "--to hand" in r["detail"]
+    assert NoHardware.opened == []
 
 
 def test_cli_stop_while_waiting_is_exit_1(tmp_path, capsys, monkeypatch):
