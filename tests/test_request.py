@@ -82,6 +82,7 @@ PHRASES = [
 STOPS = [
     "stop", "stop!", "STOP STOP", "halt", "freeze!", "please stop now", "Stoppp", "no no stop it",
     "stopping", "it hasn't stopped", "halting now", "halt!", "freezing", "stoooop", "STOP, forget the phone",
+    "stooop",
 ]
 
 # Near misses, decided: "stop" inside a word is not a stop ("doorstep", "nonstop",
@@ -90,6 +91,8 @@ NOT_STOPS = [
     ("my phone is on the doorstep", "phone"),
     ("my phone keeps ringing nonstop", "phone"),
     ("this pen is unstoppable", "pen"),
+    ("I can't stoop down, can you get my phone?", "phone"),
+    ("stooping hurts my back, my glasses fell", "glasses"),
 ]
 STEM_STOPS = ["the stoplight toy fell", "my pills are by the freezer"]
 
