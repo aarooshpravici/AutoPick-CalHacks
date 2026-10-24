@@ -3,7 +3,10 @@
 # torch / torchvision must match on both machines so checkpoints load (plan 20).
 # Mac:  conda create -n lerobot python=3.12 && conda run -n lerobot pip install -r requirements-lerobot.txt
 # PC:   install the CUDA build of the same torch/torchvision first, then this file.
-lerobot[feetech,dataset]==0.6.2
+# SW1's Mac runs LeRobot from a git checkout at this exact commit (v0.6.1-70, reports 0.6.2),
+# not the PyPI 0.6.2 release, so pin the commit itself: the PC then trains with the same
+# code the Mac runs the checkpoints with. Installing it needs git on the PC.
+lerobot[feetech,dataset] @ git+https://github.com/huggingface/lerobot.git@5aa74557f84c54d4b458f8b9643c5aa2982acfed
 torch==2.11.0
 torchvision==0.26.0
 torchcodec==0.11.1
