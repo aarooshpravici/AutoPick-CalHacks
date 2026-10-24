@@ -33,16 +33,40 @@ class OldFakeConfig:                    # a LeRobot without disable_torque_on_di
 
 
 class FakeBus:
+    """Records register writes and torque-enables in order, like the Feetech bus would see them."""
+
     def __init__(self):
         self.disconnects = []
+        self.motors = {j: i + 1 for i, j in enumerate(JOINTS)}
+        self.present = {j: 1800 + 37 * i for i, j in enumerate(JOINTS)}   # raw ticks, not a stale goal
+        self.log = []
+        self.is_connected = False
 
     def disconnect(self, disable_torque=True):
         self.disconnects.append(disable_torque)
+        self.is_connected = False
+
+    def sync_read(self, register, motors=None, normalize=True, num_retry=0):
+        assert register == "Present_Position" and normalize is False
+        return {m: self.present[m] for m in (list(self.motors) if motors is None else motors)}
+
+    def write(self, register, motor, value, normalize=True, num_retry=0):
+        assert normalize is False
+        self.log.append(("write", register, motor, value))
+
+    def sync_write(self, register, values, normalize=True, num_retry=0):
+        assert normalize is False
+        for motor, value in values.items():
+            self.log.append(("write", register, motor, value))
+
+    def enable_torque(self, motors=None, num_retry=0):
+        self.log.append(("enable", motors))
 
 
 class FakeFollower:
     instances = []
     calibrated = True
+    fail_connects = 0                    # handshakes that fail before one succeeds
 
     def __init__(self, config):
         self.config = config
@@ -57,7 +81,13 @@ class FakeFollower:
         return FakeFollower.calibrated
 
     def connect(self, calibrate=True):
+        """Like LeRobot 0.6.2: open the bus, then configure() re-enables the torque."""
         self.connect_calls.append(calibrate)
+        self.bus.is_connected = True
+        if FakeFollower.fail_connects > 0:
+            FakeFollower.fail_connects -= 1
+            raise ConnectionError("Failed to write 'Lock' on id_=3 with '1' after 1 tries.\n[TxRxResult] ...")
+        self.bus.enable_torque()
 
     def get_observation(self):
         obs = {f"{j}.pos": float(i) + 0.5 for i, j in enumerate(JOINTS)}
@@ -75,6 +105,7 @@ class FakeFollower:
 def install(monkeypatch, module_name, config_cls=FakeConfig):
     FakeFollower.instances = []
     FakeFollower.calibrated = True
+    FakeFollower.fail_connects = 0
     mod = types.ModuleType(module_name)
     mod.SO101Follower = FakeFollower
     mod.SO101FollowerConfig = config_cls
@@ -138,3 +169,51 @@ def test_requires_a_step_cap(old_layout, cap):
 def test_step_cap_has_no_default():
     with pytest.raises(TypeError):
         RealArm(port="/dev/fake", robot_id="so101_follower_arm")
+
+
+# --- no startup jolt (same fix as safe_teleop.py) -----------------------------------
+
+@pytest.fixture(autouse=True)
+def no_waiting(monkeypatch):
+    import arm.real as real_mod
+    monkeypatch.setattr(real_mod, "time", types.SimpleNamespace(sleep=lambda s: None), raising=False)
+
+
+def test_goal_is_set_to_present_before_the_torque_comes_on(new_layout):
+    RealArm("/dev/ttyFAKE", "so101_follower_arm", 10)
+    bus = FakeFollower.instances[-1].bus
+    enable_at = bus.log.index(("enable", None))
+    before = bus.log[:enable_at]
+    for j in JOINTS:
+        assert ("write", "Goal_Position", j, bus.present[j]) in before
+        cap = 500 if j in ("gripper", "shoulder_pan") else 1000
+        assert ("write", "Torque_Limit", j, int(cap * 0.2)) in before
+
+
+def test_torque_limit_ramps_up_to_the_caps_after_connect(new_layout):
+    waits = []
+    RealArm("/dev/ttyFAKE", "so101_follower_arm", 10, ramp_s=1.5, sleep=waits.append)
+    bus = FakeFollower.instances[-1].bus
+    after = bus.log[bus.log.index(("enable", None)) + 1:]
+    assert all(e[0] == "write" and e[1] == "Torque_Limit" for e in after)   # no Goal moves while ramping
+    last = {e[2]: e[3] for e in after}
+    assert last == {j: (500 if j in ("gripper", "shoulder_pan") else 1000) for j in JOINTS}
+    first = {e[2]: e[3] for e in after[:len(JOINTS)]}
+    assert all(first[j] < last[j] for j in JOINTS)                          # it rises, not jumps
+    assert sum(waits) == pytest.approx(1.5)
+
+
+def test_a_missed_handshake_is_retried(new_layout):
+    FakeFollower.fail_connects = 2
+    RealArm("/dev/ttyFAKE", "so101_follower_arm", 10)
+    robot = FakeFollower.instances[-1]
+    assert robot.connect_calls == [False, False, False]
+    assert robot.bus.disconnects == [False, False]                          # closed between tries
+    assert ("enable", None) in robot.bus.log
+
+
+def test_gives_up_after_five_failed_handshakes_without_enabling_torque(new_layout):
+    FakeFollower.fail_connects = 5
+    with pytest.raises(RuntimeError, match="not answering after 5 tries"):
+        RealArm("/dev/ttyFAKE", "so101_follower_arm", 10)
+    assert ("enable", None) not in FakeFollower.instances[-1].bus.log
