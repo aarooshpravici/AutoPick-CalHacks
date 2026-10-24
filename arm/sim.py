@@ -4,6 +4,10 @@ Joints slide toward their targets. A closing claw stops on the "object" when the
 arm is at the at_object pose. Options make the first N grasps miss, make the
 object slip out while lifting, or freeze one joint (to test "stuck").
 
+Hand-off: once the arm has held the object at the present pose for take_after_s,
+the person takes it. The object is gone, so the squeezing claw closes fully.
+never_take=True: nobody takes it (to test the timeout).
+
 The sim runs on a virtual clock: pick.py sleeps through arm.clock, and each sleep
 advances the simulation instead of waiting, so a whole pick takes milliseconds.
 """
@@ -19,6 +23,7 @@ DEFAULT_POSES = {
     "above_object": {"shoulder_pan": 0.0, "shoulder_lift": -20.0, "elbow_flex": 40.0, "wrist_flex": 70.0, "wrist_roll": 0.0, "gripper": 60.0},
     "at_object":    {"shoulder_pan": 0.0, "shoulder_lift": 5.0, "elbow_flex": 25.0, "wrist_flex": 75.0, "wrist_roll": 0.0, "gripper": 60.0},
     "lift":         {"shoulder_pan": 0.0, "shoulder_lift": -60.0, "elbow_flex": 70.0, "wrist_flex": 40.0, "wrist_roll": 0.0, "gripper": 2.0},
+    "present":      {"shoulder_pan": 0.0, "shoulder_lift": -30.0, "elbow_flex": 0.0, "wrist_flex": 10.0, "wrist_roll": 0.0, "gripper": 2.0},
     "above_tray":   {"shoulder_pan": 0.0, "shoulder_lift": -100.0, "elbow_flex": 40.0, "wrist_flex": 95.0, "wrist_roll": 0.0, "gripper": 2.0},
     "gripper_open": 60.0,
     "gripper_closed": 2.0,
@@ -46,10 +51,12 @@ class SimArm:
     """Same interface as arm.real.RealArm: read(), command(targets), close(), clock."""
 
     def __init__(self, poses: dict | None = None, miss_first: int = 0, slip_on_lift: bool = False,
-                 stall_joint: str | None = None, joint_speed_deg_s: float = 180.0,
-                 grip_speed_s: float = 150.0, object_width: float = 15.0):
+                 stall_joint: str | None = None, take_after_s: float = 2.0, never_take: bool = False,
+                 joint_speed_deg_s: float = 180.0, grip_speed_s: float = 150.0, object_width: float = 15.0):
         if stall_joint is not None and stall_joint not in ARM_JOINTS:
             raise ValueError(f"stall_joint must be one of {ARM_JOINTS}, got {stall_joint!r}")
+        if isinstance(take_after_s, bool) or not isinstance(take_after_s, (int, float)) or not take_after_s >= 0:
+            raise ValueError(f"take_after_s must be a number of seconds >= 0, got {take_after_s!r}")
         self.poses = poses_mod.validate(poses or DEFAULT_POSES)
         self.pos = {j: float(self.poses["ready"][j]) for j in JOINTS}
         self.goal = dict(self.pos)
@@ -57,9 +64,11 @@ class SimArm:
         self.misses_left = miss_first
         self.slip_on_lift = slip_on_lift
         self.stall_joint = stall_joint
+        self.take_after_s = None if never_take else float(take_after_s)
+        self.presented_s = 0.0          # how long the object has been held at the present pose
         self.joint_speed = joint_speed_deg_s
         self.grip_speed = grip_speed_s
-        self.object = "floor"           # floor | held | tray
+        self.object = "floor"           # floor | held | tray | hand (the person took it)
         self.grasps = 0                 # closes that reached the object
         self._missing = False           # this close is a miss: the claw passes the object
         g_open, g_closed = self.poses["gripper_open"], self.poses["gripper_closed"]
@@ -82,6 +91,8 @@ class SimArm:
     # --- physics -------------------------------------------------------------
 
     def _near(self, pose_name: str) -> bool:
+        if pose_name not in self.poses:  # present / above_tray: only one mode needs each
+            return False
         pose = self.poses[pose_name]
         return all(abs(self.pos[j] - pose[j]) <= NEAR_DEG for j in ("shoulder_lift", "elbow_flex", "wrist_flex"))
 
@@ -98,6 +109,13 @@ class SimArm:
         if self.object == "held" and self.slip_on_lift and self._near("lift"):
             self.object = "floor"       # slipped out: the claw now closes on nothing
             self._missing = True
+
+        if self.object == "held" and self._near("present"):
+            self.presented_s += dt
+            if self.take_after_s is not None and self.presented_s >= self.take_after_s:
+                self.object = "hand"    # pulled out: nothing stops the claw now
+        else:
+            self.presented_s = 0.0
 
         g = _approach(self.pos["gripper"], self.goal["gripper"], self.grip_speed * dt)
         if self.object == "held":

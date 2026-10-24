@@ -30,8 +30,10 @@ perception:
   # Floor origin: directly below front camera; x forward, y left, metres.
   parking_spot_floor_m: [0.22, 0.0]   # Replace with the P4 measurement.
   parking_tolerance_m: 0.02
+handoff:
+  timeout_s: 60                       # seconds holding at the present pose before giving up
 lift:
   seated_hand_mm: 700
   standing_hand_mm: 1000
   taken_weight_drop_g: 50
-items: [phone, glasses, pill_bottle, remote, pen, sock]
+items: [phone]                        # stretch: glasses, pill_bottle, remote, pen, sock

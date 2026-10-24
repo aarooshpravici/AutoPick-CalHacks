@@ -64,10 +64,12 @@ items: [phone, glasses, pill_bottle, remote, pen, sock]
 """
 
 STOP_LIMIT_S = 0.5      # plan 10.8 / 17
+ITEMS = ["phone", "glasses", "pill_bottle", "remote", "pen", "sock"]    # as in ROBOT_YAML above
 
 
 def offline_parse(text):
-    return parse_request(text, use_api=False)
+    # The items above, not config/robot.yaml's (that list is only [phone] since A7).
+    return parse_request(text, ITEMS, use_api=False)
 
 
 class RecordingBrain(FakeBrain):
