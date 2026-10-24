@@ -10,7 +10,7 @@
 | GET  /          | The page: text box, big STOP button, current state, thumbnails    |
 | POST /request   | {"text": "...", "hand": "seated"|"standing"}: parsed, sent on     |
 | POST /stop      | Stop everything                                                   |
-| GET  /status    | Brain state, last detection, lift height, tray weight, last pick  |
+| GET  /status    | Brain state, last detection, last pick; lift and tray (null: none) |
 | GET  /thumb/{n} | Latest JPEG from camera n, if the brain provides one              |
 
 The brain is anything that follows the `Brain` protocol below.
@@ -92,13 +92,14 @@ class Brain(Protocol):
     def status(self) -> dict:
         """A JSON-safe snapshot, cheap to make (the page asks twice a second):
 
-            state      str    plan 10.7 state ("Idle", "Search", ..., "Failed") or "Stopped"
+            state      str    plan 10.7 state: "Idle", "Search", "Approach", "Pick", "Present",
+                              "WaitForTake" or "Failed", or "Stopped"
             item       str | None    what it is fetching
             message    str    one line for people ("Looking for: phone")
             detection  dict | None   latest plan 9.2 item: {"label", "conf", "floor_m", ...}
-            lift_mm    float  tray height above the bottom switch
-            tray_g     float  load-cell reading
-            last_pick  dict | None   the plan 9.4 pick result dict
+            lift_mm    float | None  tray height above the bottom switch; None without the lift (9.7)
+            tray_g     float | None  load-cell reading; None without the lift (9.7)
+            last_pick  dict | None   the plan 9.4 pick_to_hand result dict
             cameras    list[str]     camera names that thumbnail() can serve
             t          float  time.time() of the snapshot
         """
@@ -199,19 +200,20 @@ def create_app(brain: Brain, parse=request_mod.parse_request) -> FastAPI:
 
 
 class FakeBrain:
-    """Walks through the mission states on a timer, for trying the page without hardware.
+    """Walks through the hand-off states on a timer, for trying the page without hardware.
 
-    `lift` is robot.yaml's lift section; only the hand heights are used, for the
-    tray height shown on the page. Nothing here moves.
+    Idle, Search, Approach, Pick, Present, WaitForTake, then Idle again (plan 10.7).
+    There is no tray lift, so lift_mm and tray_g are None (plan 9.7). `lift` is
+    accepted and ignored, so a robot.yaml with or without a lift section works.
+    Nothing here moves.
     """
 
-    STEPS = [("Search", 2.0), ("Approach", 3.0), ("Pick", 4.0), ("Raise", 2.0),
-             ("WaitForTake", 4.0), ("Lower", 2.0)]
-    PLAN_LIFT = {"seated_hand_mm": 700, "standing_hand_mm": 1000}    # plan 9.1, if there is no robot.yaml
+    STEPS = [("Search", 2.0), ("Approach", 3.0), ("Pick", 4.0), ("Present", 2.0), ("WaitForTake", 4.0)]
+    MESSAGES = {"Search": "Looking for: {item}", "Approach": "Driving to the {item}",
+                "Pick": "Picking it up", "Present": "Holding it up for you",
+                "WaitForTake": "Take your {item} from the claw"}
 
     def __init__(self, lift: dict | None = None):
-        lift = lift or self.PLAN_LIFT
-        self._hand_mm = {"seated": float(lift["seated_hand_mm"]), "standing": float(lift["standing_hand_mm"])}
         self._lock = threading.Lock()
         self._state = "Idle"
         self._item = None
@@ -225,7 +227,7 @@ class FakeBrain:
             self._state, self._item, self._hand = "Search", item, hand
             self._started = time.monotonic()
             self._last_pick = None
-            self._message = f"Looking for: {item.replace('_', ' ')}"
+            self._message = self.MESSAGES["Search"].format(item=item.replace("_", " "))
 
     def stop(self) -> None:
         with self._lock:
@@ -238,27 +240,27 @@ class FakeBrain:
         elapsed = time.monotonic() - self._started
         for state, seconds in self.STEPS:
             if elapsed < seconds:
-                if state in ("Raise", "WaitForTake", "Lower") and self._last_pick is None:
-                    self._last_pick = {"result": "in_tray", "grasp": "scripted", "attempts": 1,
-                                       "seconds": 4.0, "detail": "FakeBrain: no arm"}
                 self._state = state
+                self._message = self.MESSAGES[state].format(item=self._item.replace("_", " "))
                 return
             elapsed -= seconds
+        # Taken: the last_pick a real pick_to_hand returns (plan 9.4).
+        self._last_pick = {"result": "taken", "grasp": "scripted", "attempts": 1,
+                           "seconds": sum(sec for state, sec in self.STEPS if state in ("Pick", "Present", "WaitForTake")),
+                           "detail": "FakeBrain: no arm"}
         self._state, self._started, self._message = "Idle", None, "Done"
 
     def status(self) -> dict:
         with self._lock:
             self._advance()
-            hand_mm = self._hand_mm[self._hand]
-            lift = {"Raise": hand_mm / 2, "WaitForTake": hand_mm, "Lower": hand_mm / 2}.get(self._state, 0.0)
             seen = self._state in ("Search", "Approach") and self._item
             return {
                 "state": self._state,
                 "item": self._item,
                 "message": self._message,
                 "detection": ({"label": self._item, "conf": 0.9, "floor_m": [0.5, 0.0]} if seen else None),
-                "lift_mm": lift,
-                "tray_g": 180.0 if self._state in ("Raise", "WaitForTake") else 0.0,
+                "lift_mm": None,
+                "tray_g": None,
                 "last_pick": self._last_pick,
                 "cameras": [],
                 "t": time.time(),
@@ -293,6 +295,20 @@ PAGE = """<!doctype html>
   .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:14px; }
   #state { font-size:28px; font-weight:700; }
   #message { color:var(--muted); margin-top:2px; }
+  #steps { display:flex; gap:6px; list-style:none; margin:12px 0 0; padding:0; font-size:13px; }
+  #steps li { flex:1; text-align:center; padding:4px 2px; border-radius:8px; color:var(--muted);
+              border:1px solid var(--line); }
+  #steps li[data-step="done"] { color:var(--ink); }
+  #steps li[data-step="now"] { background:var(--go); border-color:var(--go); color:#fff; font-weight:700; }
+  #statecard[data-state="WaitForTake"] { background:var(--go); border-color:var(--go); color:#fff;
+          text-align:center; padding:24px 14px; animation:take 1.4s ease-in-out infinite; }
+  #statecard[data-state="WaitForTake"] #state { font-size:40px; }
+  #statecard[data-state="WaitForTake"] #message { color:#fff; font-size:20px; }
+  #statecard[data-state="WaitForTake"] #steps li { color:#fff; border-color:rgba(255,255,255,.5); }
+  #statecard[data-state="WaitForTake"] #steps li[data-step="now"] { background:#fff; color:var(--go); }
+  .stale #statecard[data-state="WaitForTake"] #state::after { color:#fff; }
+  @keyframes take { 50% { box-shadow:0 0 0 8px rgba(31,111,74,.35); } }
+  @media (prefers-reduced-motion: reduce) { #statecard[data-state="WaitForTake"] { animation:none; } }
   form { display:flex; gap:8px; flex-wrap:wrap; }
   #text { flex:1 1 220px; font:inherit; font-size:18px; padding:12px; border-radius:10px;
           border:1px solid var(--line); background:var(--bg); color:var(--ink); }
@@ -302,6 +318,7 @@ PAGE = """<!doctype html>
   button.go[aria-disabled="true"] { opacity:.45; cursor:wait; }
   dl { display:grid; grid-template-columns:auto 1fr; gap:6px 14px; margin:0; }
   dt { color:var(--muted); } dd { margin:0; font-variant-numeric:tabular-nums; }
+  .row { display:contents; } .row[hidden] { display:none; }
   #thumbs { display:flex; gap:8px; flex-wrap:wrap; } #thumbs img { width:150px; border-radius:8px; }
   #reply { color:var(--muted); min-height:1.4em; }
   .stale #state::after { content:" (no connection)"; font-size:16px; color:var(--stop); }
@@ -315,6 +332,10 @@ PAGE = """<!doctype html>
   </div>
   <section class="card" id="statecard">
     <div id="state">…</div><div id="message"></div>
+    <ol id="steps" aria-label="Hand-off steps">
+      <li id="step-Search">Search</li><li id="step-Approach">Drive</li><li id="step-Pick">Pick</li>
+      <li id="step-Present">Present</li><li id="step-WaitForTake">Take</li>
+    </ol>
   </section>
   <section class="card">
     <form id="ask">
@@ -328,8 +349,8 @@ PAGE = """<!doctype html>
     <dl>
       <dt>Item</dt><dd id="item">–</dd>
       <dt>Seen</dt><dd id="detection">–</dd>
-      <dt>Tray height</dt><dd id="lift">–</dd>
-      <dt>Tray weight</dt><dd id="tray">–</dd>
+      <div class="row" id="liftrow" hidden><dt>Tray height</dt><dd id="lift"></dd></div>
+      <div class="row" id="trayrow" hidden><dt>Tray weight</dt><dd id="tray"></dd></div>
       <dt>Last pick</dt><dd id="pick">–</dd>
     </dl>
     <div id="thumbs"></div>
@@ -339,6 +360,12 @@ PAGE = """<!doctype html>
 const $ = id => document.getElementById(id);
 const STOP_WORDS = new RegExp(__STOP_PATTERN__, "i");   // the same check as ui/request.py
 const label = s => s.replaceAll("_", " ");
+
+// The hand-off, in order (plan 10.7), and what the big heading says for each state.
+const STEPS = ["Search", "Approach", "Pick", "Present", "WaitForTake"];
+const TITLES = {Search: "Searching", Approach: "Driving over", Pick: "Picking it up", Present: "Holding it up"};
+const title = s => s.state === "WaitForTake" ? (s.item ? `Take your ${label(s.item)}` : "Take it")
+                                              : TITLES[s.state] || s.state;
 
 // fetch with a time limit; reads the status before trying to read JSON.
 async function call(url, opts, ms) {
@@ -414,11 +441,16 @@ async function refresh() {
     if (!r.ok || !r.body) throw new Error(`status ${r.status}`);
     const s = r.body;
     $("statecard").parentElement.classList.remove("stale");
-    $("state").textContent = s.state; $("message").textContent = s.message || "";
+    $("state").textContent = title(s); $("message").textContent = s.message || "";
+    $("statecard").dataset.state = s.state;
+    const at = STEPS.indexOf(s.state);
+    STEPS.forEach((n, i) => $("step-" + n).setAttribute("data-step", i < at ? "done" : i === at ? "now" : "todo"));
     $("item").textContent = s.item ? label(s.item) : "–";
     $("detection").textContent = s.detection ? `${s.detection.label} ${Math.round(s.detection.conf * 100)}%` : "–";
-    $("lift").textContent = s.lift_mm != null ? `${Math.round(s.lift_mm)} mm` : "–";
-    $("tray").textContent = s.tray_g != null ? `${Math.round(s.tray_g)} g` : "–";
+    $("liftrow").hidden = s.lift_mm == null;       // no lift: no row, not a dash
+    $("trayrow").hidden = s.tray_g == null;
+    if (s.lift_mm != null) $("lift").textContent = `${Math.round(s.lift_mm)} mm`;
+    if (s.tray_g != null) $("tray").textContent = `${Math.round(s.tray_g)} g`;
     $("pick").textContent = s.last_pick ? `${s.last_pick.result} (${s.last_pick.grasp}, ${s.last_pick.seconds} s)` : "–";
     const names = (s.cameras || []).join(",");
     if (names !== shown) {

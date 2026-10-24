@@ -44,8 +44,10 @@ const count = path => seen.filter(p => p === path).length;
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const submit = text => { el("text").value = text; return el("ask").listeners.submit({preventDefault() {}}); };
 const clickStop = () => el("stop").listeners.click();
+// One /status round, after the page's own first refresh() has finished (it drops overlapping calls).
+const poll = async () => { await sleep(10); await refresh(); };
 
-const STATUS = {state: "Idle", item: null, message: "", detection: null, lift_mm: 0, tray_g: 0,
+const STATUS = {state: "Idle", item: null, message: "", detection: null, lift_mm: null, tray_g: null,
                 last_pick: null, cameras: [], t: 0};
 routes["/status"] = () => reply(200, STATUS);
 
@@ -140,6 +142,50 @@ const scenarios = {
     refresh();
     await sleep(10);
     assert.ok(count("/status") >= 3, "a new /status is sent once the hung one timed out");
+  },
+  async lift_and_tray_rows_are_hidden_when_null() {
+    routes["/status"] = () => reply(200, {...STATUS, state: "Pick", item: "phone"});
+    await poll();
+    assert.strictEqual(el("liftrow").hidden, true, "no lift row without the lift");
+    assert.strictEqual(el("trayrow").hidden, true, "no tray row without the lift");
+    assert.strictEqual(el("lift").textContent, "", "no dash in the hidden row");
+    assert.strictEqual(el("tray").textContent, "");
+  },
+  async lift_and_tray_rows_show_when_there_are_numbers() {
+    routes["/status"] = () => reply(200, {...STATUS, lift_mm: 650.4, tray_g: 180});
+    await poll();
+    assert.strictEqual(el("liftrow").hidden, false);
+    assert.strictEqual(el("trayrow").hidden, false);
+    assert.strictEqual(el("lift").textContent, "650 mm");
+    assert.strictEqual(el("tray").textContent, "180 g");
+    routes["/status"] = () => reply(200, STATUS);          // the lift goes away again
+    await poll();
+    assert.strictEqual(el("liftrow").hidden, true);
+    assert.strictEqual(el("trayrow").hidden, true);
+  },
+  async wait_for_take_is_prominent() {
+    routes["/status"] = () => reply(200, {...STATUS, state: "WaitForTake", item: "pill_bottle",
+                                          message: "Take your pill bottle from the claw"});
+    await poll();
+    assert.strictEqual(el("state").textContent, "Take your pill bottle");
+    assert.strictEqual(el("message").textContent, "Take your pill bottle from the claw");
+    assert.strictEqual(el("statecard").dataset.state, "WaitForTake", "the card styles itself from this");
+    assert.strictEqual(el("step-WaitForTake").attrs["data-step"], "now");
+  },
+  async handoff_steps_follow_the_state() {
+    const marks = () => ["Search", "Approach", "Pick", "Present", "WaitForTake"]
+      .map(n => el("step-" + n).attrs["data-step"]).join(" ");
+    routes["/status"] = () => reply(200, {...STATUS, state: "Present", item: "phone"});
+    await poll();
+    assert.strictEqual(el("state").textContent, "Holding it up");
+    assert.strictEqual(marks(), "done done done now todo");
+    routes["/status"] = () => reply(200, {...STATUS, state: "Idle"});
+    await poll();
+    assert.strictEqual(el("state").textContent, "Idle");
+    assert.strictEqual(marks(), "todo todo todo todo todo");
+    routes["/status"] = () => reply(200, {...STATUS, state: "Stopped", message: "Stopped"});
+    await poll();
+    assert.strictEqual(el("state").textContent, "Stopped");
   },
 };
 
