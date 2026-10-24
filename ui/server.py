@@ -1,7 +1,9 @@
 """Status page with STOP (task U2, plan 9.7). FastAPI on port 8000.
 
-    python -m ui.server            # with the real brain (task M1)
-    python -m ui.server --fake     # with FakeBrain, no hardware
+    python -m ui.server                    # FakeBrain, no hardware (the default)
+    python -m ui.server --sim              # the brain (task M1) with simulated arm, base and camera
+    python -m ui.server --real             # the brain on the robot: asks you to confirm first
+    python -m ui.server --host 0.0.0.0     # let a phone on the same Wi-Fi open it (no password)
 
 | Route           | Does                                                              |
 |-----------------|-------------------------------------------------------------------|
@@ -11,60 +13,174 @@
 | GET  /status    | Brain state, last detection, lift height, tray weight, last pick  |
 | GET  /thumb/{n} | Latest JPEG from camera n, if the brain provides one              |
 
-The brain is any object with:
+The brain is anything that follows the `Brain` protocol below.
 
-    request(item: str, hand: str) -> None   start fetching item; hand is "seated" or "standing"
-    stop() -> None                          stop now: wheels stop, arm holds, lift holds
-    status() -> dict                        see FakeBrain.status for the fields
-    thumbnail(name: str) -> bytes | None    optional, JPEG bytes
-
-STOP never waits on the parser or the network: /stop calls brain.stop() at once,
-and "stop" typed in the box is caught by the parser's keyword check.
+STOP never waits on the parser, the network or the worker threads:
+- /stop is an async route, so it runs on the event loop and calls brain.stop()
+  at once even when every worker thread is busy with slow parses or status calls.
+- "stop" typed in the box is caught by the keyword check before the hand is
+  checked or the parser runs, also on the event loop.
+- A request still being parsed when STOP arrives is dropped, never started.
+- Shutting the server down calls brain.stop().
 """
 
 from __future__ import annotations
 
 import argparse
+import json
+import socket
+import sys
 import threading
 import time
+from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Any, Protocol, runtime_checkable
 
 from fastapi import FastAPI, HTTPException
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, Response
 from pydantic import BaseModel
 
 from . import request as request_mod
 
 HANDS = ("seated", "standing")
+STATUS_FIELDS = ("state", "item", "message", "detection", "lift_mm", "tray_g", "last_pick", "cameras", "t")
+
+
+@runtime_checkable
+class Brain(Protocol):
+    """What the status page needs from the brain (task M1). SW1 proposes this to SW2.
+
+    The server calls these from several threads at once: request(), status() and
+    thumbnail() from its worker threads, stop() from the event loop. Every method
+    must be thread-safe. stop() can arrive at any moment, including while
+    request() or status() is running.
+
+    How M1 plugs in, either way works:
+    - M1 imports `create_app(brain)` and runs uvicorn in the brain's own process, or
+    - brain/mission.py provides `build(config: dict, sim: bool) -> Brain`, where
+      config is the parsed config/robot.yaml and sim=True means simulated arm,
+      fake serial port and replayed detections (plan 10.7). `python -m ui.server
+      --sim` and `--real` call it. build() must not move anything.
+    """
+
+    def request(self, item: str, hand: str) -> None:
+        """Start fetching `item` (one of robot.yaml `items`) for a person whose hand
+        is at `hand` height: "seated" or "standing" (robot.yaml lift.seated_hand_mm
+        or lift.standing_hand_mm).
+
+        Return at once: record the goal and let the brain's own 10 Hz loop do the
+        work. Replaces any mission in progress, and leaves Stopped. The server never
+        calls request() for a request that arrived before the latest stop(), and if
+        a stop() races with request() the server calls stop() again afterwards, so
+        the brain does not need its own ordering check.
+        """
+        ...
+
+    def stop(self) -> None:
+        """Stop everything now: wheels stop (serial STOP), arm holds its pose, lift
+        holds. State becomes "Stopped" until the next request().
+
+        Must return at once (well under 50 ms): it runs on the web server's event
+        loop, so it must not sleep, wait for a reply, join a thread, or take a lock
+        that is held during serial, camera or arm I/O. Set a flag or send the stop
+        commands and return. Must be idempotent: the server may call it twice.
+        If it raises, the page shows STOP FAILED and tells people to hit the E-stop.
+        """
+        ...
+
+    def status(self) -> dict:
+        """A JSON-safe snapshot, cheap to make (the page asks twice a second):
+
+            state      str    plan 10.7 state ("Idle", "Search", ..., "Failed") or "Stopped"
+            item       str | None    what it is fetching
+            message    str    one line for people ("Looking for: phone")
+            detection  dict | None   latest plan 9.2 item: {"label", "conf", "floor_m", ...}
+            lift_mm    float  tray height above the bottom switch
+            tray_g     float  load-cell reading
+            last_pick  dict | None   the plan 9.4 pick result dict
+            cameras    list[str]     camera names that thumbnail() can serve
+            t          float  time.time() of the snapshot
+        """
+        ...
+
+    def thumbnail(self, name: str) -> bytes | None:
+        """Latest JPEG from camera `name` (a robot.yaml `cameras` name), or None.
+
+        Return a frame the brain already holds: never open a camera or a serial
+        port, and never wait for a new frame. A brain without pictures returns None
+        (the server also copes if the method is missing).
+        """
+        ...
 
 
 class RequestBody(BaseModel):
     text: str
-    hand: str = "seated"
+    hand: Any = "seated"      # checked by hand after the STOP check, so "stop" always wins
 
 
-def create_app(brain, parse=request_mod.parse_request) -> FastAPI:
-    app = FastAPI(title="Floor Picker")
+class _StopCount:
+    """How many STOPs so far. A request parsed across a STOP is dropped."""
+
+    def __init__(self):
+        self._lock = threading.Lock()      # held only for the increment, never during a brain call
+        self._n = 0
+
+    def bump(self) -> None:
+        with self._lock:
+            self._n += 1
+
+    @property
+    def value(self) -> int:
+        with self._lock:
+            return self._n
+
+
+def create_app(brain: Brain, parse=request_mod.parse_request) -> FastAPI:
+    stops = _StopCount()
+
+    def stop_now() -> None:
+        stops.bump()                       # first, so in-flight requests are dropped even if stop() raises
+        brain.stop()
+
+    @asynccontextmanager
+    async def lifespan(app):
+        try:
+            yield
+        finally:
+            brain.stop()                   # no page, no STOP button: the robot stops too
+
+    app = FastAPI(title="Floor Picker", lifespan=lifespan)
 
     @app.get("/", response_class=HTMLResponse)
     def page():
         return PAGE
 
-    # Plain `def` routes run in a thread pool, so a slow parse never blocks /stop.
+    # async: runs on the event loop, never queued behind the worker threads.
     @app.post("/stop")
-    def stop():
+    async def stop():
         t0 = time.monotonic()
-        brain.stop()
-        return {"stopped": True, "ms": round((time.monotonic() - t0) * 1000, 1)}
+        stop_now()
+        return {"stopped": True, "brain_ms": round((time.monotonic() - t0) * 1000, 1)}
 
     @app.post("/request")
-    def post_request(body: RequestBody):
+    async def post_request(body: RequestBody):
+        if request_mod.is_stop(body.text):            # stop wins, before the hand check or the parser
+            stop_now()
+            return {"parsed": {"action": "stop", "item": None}}
         if body.hand not in HANDS:
             raise HTTPException(422, f"hand must be one of {HANDS}")
-        parsed = parse(body.text)
+        seen = stops.value
+        parsed = await run_in_threadpool(parse, body.text)    # may take seconds (Claude API)
         if parsed["action"] == "stop":
-            brain.stop()
+            stop_now()
         elif parsed["action"] == "fetch":
-            brain.request(parsed["item"], body.hand)
+            if stops.value != seen:                    # STOP arrived while parsing
+                return {"parsed": parsed, "dropped": "stopped"}
+            await run_in_threadpool(brain.request, parsed["item"], body.hand)
+            if stops.value != seen:                    # STOP raced with request(): make sure it wins
+                brain.stop()
+                return {"parsed": parsed, "dropped": "stopped"}
         return {"parsed": parsed}
 
     @app.get("/status")
@@ -83,12 +199,19 @@ def create_app(brain, parse=request_mod.parse_request) -> FastAPI:
 
 
 class FakeBrain:
-    """Walks through the mission states on a timer, for trying the page without hardware."""
+    """Walks through the mission states on a timer, for trying the page without hardware.
+
+    `lift` is robot.yaml's lift section; only the hand heights are used, for the
+    tray height shown on the page. Nothing here moves.
+    """
 
     STEPS = [("Search", 2.0), ("Approach", 3.0), ("Pick", 4.0), ("Raise", 2.0),
              ("WaitForTake", 4.0), ("Lower", 2.0)]
+    PLAN_LIFT = {"seated_hand_mm": 700, "standing_hand_mm": 1000}    # plan 9.1, if there is no robot.yaml
 
-    def __init__(self):
+    def __init__(self, lift: dict | None = None):
+        lift = lift or self.PLAN_LIFT
+        self._hand_mm = {"seated": float(lift["seated_hand_mm"]), "standing": float(lift["standing_hand_mm"])}
         self._lock = threading.Lock()
         self._state = "Idle"
         self._item = None
@@ -101,6 +224,7 @@ class FakeBrain:
         with self._lock:
             self._state, self._item, self._hand = "Search", item, hand
             self._started = time.monotonic()
+            self._last_pick = None
             self._message = f"Looking for: {item.replace('_', ' ')}"
 
     def stop(self) -> None:
@@ -115,7 +239,8 @@ class FakeBrain:
         for state, seconds in self.STEPS:
             if elapsed < seconds:
                 if state in ("Raise", "WaitForTake", "Lower") and self._last_pick is None:
-                    self._last_pick = {"result": "in_tray", "grasp": "scripted", "attempts": 1, "seconds": 4.0}
+                    self._last_pick = {"result": "in_tray", "grasp": "scripted", "attempts": 1,
+                                       "seconds": 4.0, "detail": "FakeBrain: no arm"}
                 self._state = state
                 return
             elapsed -= seconds
@@ -124,19 +249,23 @@ class FakeBrain:
     def status(self) -> dict:
         with self._lock:
             self._advance()
-            lift = {"Raise": 400, "WaitForTake": 700 if self._hand == "seated" else 1000, "Lower": 300}.get(self._state, 0)
+            hand_mm = self._hand_mm[self._hand]
+            lift = {"Raise": hand_mm / 2, "WaitForTake": hand_mm, "Lower": hand_mm / 2}.get(self._state, 0.0)
             seen = self._state in ("Search", "Approach") and self._item
             return {
-                "state": self._state,                  # brain state (plan 10.7) or "Stopped"
-                "item": self._item,                    # what it's fetching
-                "message": self._message,              # one line for people
+                "state": self._state,
+                "item": self._item,
+                "message": self._message,
                 "detection": ({"label": self._item, "conf": 0.9, "floor_m": [0.5, 0.0]} if seen else None),
                 "lift_mm": lift,
                 "tray_g": 180.0 if self._state in ("Raise", "WaitForTake") else 0.0,
-                "last_pick": self._last_pick,          # arm.pick result dict
-                "cameras": [],                         # names with /thumb pictures
+                "last_pick": self._last_pick,
+                "cameras": [],
                 "t": time.time(),
             }
+
+    def thumbnail(self, name: str) -> bytes | None:
+        return None
 
 
 PAGE = """<!doctype html>
@@ -158,6 +287,9 @@ PAGE = """<!doctype html>
           color:#fff; font-size:44px; font-weight:800; letter-spacing:.08em; cursor:pointer;
           box-shadow:0 6px 0 var(--stop-dark); }
   #stop:active { transform:translateY(4px); box-shadow:0 2px 0 var(--stop-dark); }
+  #stopfail { background:var(--stop); color:#fff; border-radius:14px; padding:14px; font-size:20px; }
+  #stopfail b { display:block; font-size:26px; }
+  #stopfail[hidden] { display:none; }
   .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:14px; }
   #state { font-size:28px; font-weight:700; }
   #message { color:var(--muted); margin-top:2px; }
@@ -167,6 +299,7 @@ PAGE = """<!doctype html>
   select, button.go { font:inherit; font-size:17px; padding:12px 14px; border-radius:10px;
           border:1px solid var(--line); background:var(--bg); color:var(--ink); }
   button.go { background:var(--go); color:#fff; border-color:var(--go); font-weight:600; }
+  button.go[aria-disabled="true"] { opacity:.45; cursor:wait; }
   dl { display:grid; grid-template-columns:auto 1fr; gap:6px 14px; margin:0; }
   dt { color:var(--muted); } dd { margin:0; font-variant-numeric:tabular-nums; }
   #thumbs { display:flex; gap:8px; flex-wrap:wrap; } #thumbs img { width:150px; border-radius:8px; }
@@ -176,6 +309,10 @@ PAGE = """<!doctype html>
 <body><main>
   <h1>FLOOR PICKER</h1>
   <button id="stop" type="button">STOP</button>
+  <div id="stopfail" role="alert" hidden>
+    <b>STOP FAILED: hit the E-stop on the robot.</b>
+    <span id="stopwhy"></span> Trying again every second.
+  </div>
   <section class="card" id="statecard">
     <div id="state">…</div><div id="message"></div>
   </section>
@@ -183,7 +320,7 @@ PAGE = """<!doctype html>
     <form id="ask">
       <input id="text" autocomplete="off" placeholder="I dropped my phone">
       <select id="hand" aria-label="Hand height"><option value="seated">Seated</option><option value="standing">Standing</option></select>
-      <button class="go" type="submit">Ask</button>
+      <button class="go" id="go" type="submit" aria-disabled="false">Ask</button>
     </form>
     <div id="reply"></div>
   </section>
@@ -200,34 +337,85 @@ PAGE = """<!doctype html>
 </main>
 <script>
 const $ = id => document.getElementById(id);
+const STOP_WORDS = new RegExp(__STOP_PATTERN__, "i");   // the same check as ui/request.py
+const label = s => s.replaceAll("_", " ");
+
+// fetch with a time limit; reads the status before trying to read JSON.
+async function call(url, opts, ms) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), ms);
+  try {
+    const r = await fetch(url, {...opts, signal: ctl.signal, cache: "no-store"});
+    let body = null;
+    try { body = await r.json(); } catch (e) { if (e.name === "AbortError") throw e; }
+    return {ok: r.ok, status: r.status, body};
+  } finally { clearTimeout(timer); }
+}
+const why = e => e.name === "AbortError" ? "no answer in time" : "no connection";
+
+let stopFailing = false, stopRetry = null, asking = false;
+function setAskBusy() { $("go").setAttribute("aria-disabled", String(asking || stopFailing)); }
+
 async function stop() {
+  clearTimeout(stopRetry);
   $("state").textContent = "Stopping…";
-  try { await fetch("/stop", {method: "POST"}); } catch (e) { $("reply").textContent = "STOP not sent: no connection"; }
-  refresh();
+  let problem;
+  try {
+    const r = await call("/stop", {method: "POST"}, 2000);
+    if (r.ok) {
+      stopFailing = false; $("stopfail").hidden = true; setAskBusy();
+      refresh();
+      return;
+    }
+    problem = `The robot did not confirm (server error ${r.status}).`;
+  } catch (e) { problem = `STOP was not delivered (${why(e)}).`; }
+  stopFailing = true;
+  $("stopwhy").textContent = problem; $("stopfail").hidden = false; setAskBusy();
+  stopRetry = setTimeout(stop, 1000);
 }
 $("stop").addEventListener("click", stop);
 document.addEventListener("keydown", e => { if (e.key === "Escape") stop(); });
+
 $("ask").addEventListener("submit", async e => {
   e.preventDefault();
   const text = $("text").value.trim(); if (!text) return;
-  $("reply").textContent = "…";
+  if (STOP_WORDS.test(text)) {           // typed stop goes straight to /stop, even mid-request
+    $("text").value = ""; $("reply").textContent = "Stopping";
+    stop();
+    return;
+  }
+  if (stopFailing) { $("reply").textContent = "STOP has not gone through yet."; return; }
+  if (asking) return;
+  asking = true; setAskBusy(); $("reply").textContent = "…";
   try {
-    const r = await fetch("/request", {method: "POST", headers: {"Content-Type": "application/json"},
-                                       body: JSON.stringify({text, hand: $("hand").value})});
-    const p = (await r.json()).parsed;
-    $("reply").textContent = p.action === "fetch" ? `Fetching: ${p.item.replace("_", " ")}`
-                           : p.action === "stop" ? "Stopped" : "I can't fetch that one.";
-    $("text").value = "";
-  } catch (e) { $("reply").textContent = "Not sent: no connection"; }
+    const r = await call("/request", {method: "POST", headers: {"Content-Type": "application/json"},
+                                      body: JSON.stringify({text, hand: $("hand").value})}, 30000);
+    if (!r.ok || !r.body || !r.body.parsed) {
+      const detail = r.body && typeof r.body.detail === "string" ? `: ${r.body.detail}` : "";
+      $("reply").textContent = `Not done (server error ${r.status}${detail})`;
+    } else {
+      const p = r.body.parsed;
+      $("reply").textContent = r.body.dropped ? "Cancelled: STOP was pressed"
+                             : p.action === "fetch" ? `Fetching: ${label(p.item)}`
+                             : p.action === "stop" ? "Stopped" : "I can't fetch that one.";
+      $("text").value = "";
+    }
+  } catch (e) { $("reply").textContent = `Not sent (${why(e)})`; }
+  finally { asking = false; setAskBusy(); }
   refresh();
 });
-let shown = "";
+
+let shown = "", refreshing = false;
 async function refresh() {
+  if (refreshing) return;                // one /status at a time, so STOP never queues behind them
+  refreshing = true;
   try {
-    const s = await (await fetch("/status")).json();
+    const r = await call("/status", {}, 1500);
+    if (!r.ok || !r.body) throw new Error(`status ${r.status}`);
+    const s = r.body;
     $("statecard").parentElement.classList.remove("stale");
     $("state").textContent = s.state; $("message").textContent = s.message || "";
-    $("item").textContent = s.item ? s.item.replace("_", " ") : "–";
+    $("item").textContent = s.item ? label(s.item) : "–";
     $("detection").textContent = s.detection ? `${s.detection.label} ${Math.round(s.detection.conf * 100)}%` : "–";
     $("lift").textContent = s.lift_mm != null ? `${Math.round(s.lift_mm)} mm` : "–";
     $("tray").textContent = s.tray_g != null ? `${Math.round(s.tray_g)} g` : "–";
@@ -236,30 +424,96 @@ async function refresh() {
     if (names !== shown) {
       shown = names;
       $("thumbs").innerHTML = "";
-      for (const n of s.cameras || []) { const img = new Image(); img.alt = n; img.dataset.name = n; $("thumbs").append(img); }
+      for (const n of s.cameras || []) {
+        const img = new Image(); img.alt = n; img.dataset.name = n;
+        img.onload = img.onerror = () => { img.dataset.busy = ""; };
+        $("thumbs").append(img);
+      }
     }
-    for (const img of $("thumbs").children) img.src = `/thumb/${img.dataset.name}?t=${Date.now()}`;
+    for (const img of $("thumbs").children) {
+      if (img.dataset.busy) continue;    // at most one picture request per camera
+      img.dataset.busy = "1";
+      img.src = `/thumb/${encodeURIComponent(img.dataset.name)}?t=${Date.now()}`;
+    }
   } catch (e) { $("statecard").parentElement.classList.add("stale"); }
+  finally { refreshing = false; }
 }
 setInterval(refresh, 500); refresh();
 </script></body></html>
-"""
+""".replace("__STOP_PATTERN__", json.dumps(request_mod.STOP_WORDS.pattern))
+
+
+def load_config(path: Path) -> dict | None:
+    """Parsed robot.yaml, or None if the file does not exist."""
+    if not path.exists():
+        return None
+    import yaml
+
+    with open(path) as f:
+        config = yaml.safe_load(f)
+    if not isinstance(config, dict):
+        raise ValueError(f"{path}: expected a mapping")
+    return config
+
+
+def page_urls(host: str, port: int) -> list[str]:
+    """Where to open the page. Uses only the local hostname: no network lookup."""
+    if host in ("0.0.0.0", "::"):
+        name = socket.gethostname()
+        local = name if name.endswith(".local") else f"{name}.local"
+        return [f"http://127.0.0.1:{port}", f"http://{local}:{port}"]
+    return [f"http://{host}:{port}"]
 
 
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(prog="python -m ui.server")
-    parser.add_argument("--fake", action="store_true", help="FakeBrain, no hardware")
-    parser.add_argument("--host", default="0.0.0.0", help="0.0.0.0 so a phone on the same Wi-Fi can open it")
+    parser = argparse.ArgumentParser(prog="python -m ui.server", description="Floor Picker status page with STOP.")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--fake", action="store_true", help="FakeBrain, no hardware (the default)")
+    mode.add_argument("--sim", action="store_true",
+                      help="the brain (task M1) with simulated arm, fake serial port and replayed detections")
+    mode.add_argument("--real", action="store_true", help="the brain on the robot hardware; asks you to confirm first")
+    parser.add_argument("--config", type=Path, default=request_mod.CONFIG_PATH, help="robot.yaml (default: %(default)s)")
+    parser.add_argument("--host", default="127.0.0.1",
+                        help="127.0.0.1 (default): this computer only. 0.0.0.0: any device on the Wi-Fi, with no password")
     parser.add_argument("--port", type=int, default=8000)
     args = parser.parse_args(argv)
-    if args.fake:
-        brain = FakeBrain()
+
+    config = load_config(args.config)
+    if not (args.sim or args.real):
+        brain = FakeBrain(lift=(config or {}).get("lift"))
+        print("FakeBrain: nothing will move. Use --sim or --real for the brain (task M1).")
     else:
-        from brain.mission import Brain          # task M1 (SW2)
-        brain = Brain()
+        if config is None:
+            print(f"error: {args.config} not found; --sim and --real need robot.yaml (task S6)", file=sys.stderr)
+            return 2
+        try:
+            from brain.mission import build          # task M1 (SW2): see the Brain protocol above
+        except ImportError:
+            print("error: brain not available yet (task M1: brain/mission.py with build(config, sim)). "
+                  "Run without --sim/--real for FakeBrain.", file=sys.stderr)
+            return 2
+        if args.real:
+            print("--real: requests from this page will drive the wheels, arm and lift.")
+            try:
+                answer = input("Is the area clear and is someone at the E-stop? Type yes to start: ")
+            except EOFError:
+                answer = ""
+            if answer.strip().lower() != "yes":
+                print("Not started.")
+                return 1
+        brain = build(config, sim=args.sim)
+
+    if args.host in ("0.0.0.0", "::"):
+        print("WARNING: anyone on this network can open the page and send the robot. There is no password.")
+    for url in page_urls(args.host, args.port):
+        print(f"Open {url}")
+
     import uvicorn
 
-    uvicorn.run(create_app(brain), host=args.host, port=args.port)
+    try:
+        uvicorn.run(create_app(brain), host=args.host, port=args.port)
+    finally:
+        brain.stop()
     return 0
 
 
