@@ -1,11 +1,11 @@
-# S6 draft: SW1 and SW2 must approve on the team board before interface freeze.
+# S6: SW1 and SW2 approved on the team board, including the calibration IDs below.
 # Runtime: LeRobot 0.6.2 / Python 3.12; perception runs separately on Python 3.10.
 # Ports, camera indices and dimensions below are placeholders until measured.
 arm:
   follower_port: /dev/tty.usbmodemXXXX  # Discover on SW1's robot Mac.
   leader_port: /dev/tty.usbmodemYYYY
-  follower_id: floorpicker_follower   # Must match existing LeRobot calibration.
-  leader_id: floorpicker_leader
+  follower_id: so101_follower_arm     # Existing calibration on SW1's robot Mac.
+  leader_id: so101_leader_arm
   max_relative_target_deg: 10
   move_speed_deg_s: 45               # Override to 25 for first real runs.
 cameras:                             # Fixed ACT names; verify indices after replugging.
