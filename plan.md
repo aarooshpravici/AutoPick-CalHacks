@@ -128,7 +128,7 @@ flowchart TB
     subgraph ROBOT["On the robot"]
         MAC["MacBook: brain, arm control,<br/>perception, web page"]
         HUB["Powered USB hub"]
-        RS["RealSense D435<br/>front camera, 30-40 cm up"]
+        RS["RealSense D435<br/>front camera, low: 7-12 cm up"]
         WRIST["Wrist webcam"]
         SCENE["Deck webcam<br/>(optional, for ACT)"]
         TOP["Mast-top webcam (stretch)<br/>finds the hand"]
@@ -171,18 +171,18 @@ block-beta
   WL["Drive wheel L"] CAM["Front camera post"] ARM["SO-101 arm"] space WR["Drive wheel R"]
   space ESP["ESP32 + drivers"] MAC["MacBook shelf"]:2 space
   space HUB["USB hub + fuses"] TRAY["Tray, low position (stretch)"] PWR["12 V in + E-stop"] space
-  CL["Caster L"] space MAST["Mast + lift stepper (stretch)"] space CR["Caster R"]
+  CL["Fixed wheel L (casters advised)"] space MAST["Mast + lift stepper (stretch)"] space CR["Fixed wheel R (casters advised)"]
 ```
 
 | Item | Size or position | Why |
 |---|---|---|
 | Deck | **Built: about 60 × 38 cm** (23.7 × 15 in, length × width), top about **7 cm** (2.75 in) off the floor once the wheels are on. The plan asked for at least 40 × 30 cm and 8–12 cm. | Fits the MacBook on board, with room for the stretch mast. Narrower than 28 cm wobbles. The arm's mount height is fixed by the A5 reach test and must not change after 09:00 Sat. |
-| Drive wheels | Two NEMA 17 steppers, axle about 5 cm from the front edge | Arm weight presses them into the floor; the robot pivots near the arm and front camera. |
-| Casters | **Two**, at the back corners, set 1–2 mm higher than the drive wheels | A wide base under the mast; the drive wheels always keep their grip. |
+| Drive wheels | **Built: four wheels, one at each corner; two are driven** by NEMA 17 steppers (front or back pair: confirm) | Differential steering: the robot turns by running the two driven wheels at different speeds. Arm weight should sit over the driven pair so they keep their grip. |
+| Non-driven wheels | **Built: two fixed wheels.** The plan asked for swivel or ball casters, set 1–2 mm higher than the drive wheels. | Fixed wheels can't swivel, so they scrape sideways whenever the robot turns. Turning in place is jerky and less accurate, and the steppers can stall. Swap them for casters if at all possible (D10). |
 | Arm | Front, centred, between or just behind the drive wheels | Its reach to the floor hangs out past the front as little as possible. |
 | Mast and tray (stretch) | Back, centred; tray on the arm's side of the mast | Only if the tray lift is built: the arm can drop into the tray at its lowest position. |
-| Heavy parts | MacBook (and a battery, if used) low, between the axle and the casters | The MacBook stays on board and is the arm's counterweight, balancing the arm reaching forward. |
-| Turning | With the axle near the front, the back of the 60 cm deck sweeps a circle about 1.15 m across when pivoting (estimate) | Turn slowly near people and furniture, and leave room near the chair. |
+| Heavy parts | MacBook (and a battery, if used) low, between the driven axle and the other wheels | The MacBook stays on board and is the arm's counterweight, balancing the arm reaching forward. |
+| Turning | The robot pivots around the middle of the driven axle. If that axle is at the front, the back of the 60 cm deck sweeps a circle about 1.15 m across (estimate). With fixed wheels the pivot point also drifts. | Turn slowly near people and furniture, and leave room near the chair. |
 
 ### 6.2 Heights (side view, not to scale)
 
@@ -192,7 +192,7 @@ block-beta
   space space TOPCAM["Mast-top camera, about 1.1 m (stretch)"]
   space space TRAYUP["Tray raised: 0.6-1.0 m (stretch)"]
   PRESENT["Present pose: the arm's highest comfortable reach, about 40-50 cm (estimate, measure in A5)"]:2 space
-  FRONTCAM["Front camera: 30-40 cm up, tilted 40 deg down"] space MAST["Mast (2020 extrusion, stretch)"]
+  FRONTCAM["Front camera: low, about 7-12 cm up, tilted about 20 deg down"] space MAST["Mast (2020 extrusion, stretch)"]
   ARM["Arm: picks below about 30 cm"] space TRAYLOW["Tray low: about 20 cm (stretch)"]
   DECK["Deck: 8-12 cm off the floor"]:3
   FLOOR["Floor: the phone sits about 22 cm ahead of the front camera when parked"]:3
@@ -204,11 +204,11 @@ The RealSense's field of view is plenty: about 1.35–1.5 m of floor width at 1 
 
 | Mount | Floor visible ahead | Grab spot (about 22 cm ahead) | Flat phone's height in a 1280×720 image at 0.5 / 1 / 2 m |
 |---|---|---|---|
-| Deck level, 12 cm up, 20° down | 0.14 m to the horizon | In view | 68 / 18 / 4 px (too thin beyond about 1 m) |
-| **Post, 35 cm up, 40° down (use this)** | 0.19–1.0 m | In view, at the bottom edge | 140 / 46 / 13 px |
+| **Deck level, 7–12 cm up, about 20° down (chosen at hour 6)** | 0.14 m to the horizon | In view | 68 / 18 / 4 px at 12 cm, thinner at 7 cm (too thin beyond about 1 m) |
+| Post, 35 cm up, 40° down (the original plan; the fallback) | 0.19–1.0 m | In view, at the bottom edge | 140 / 46 / 13 px |
 | Mast, 50 cm up, 45° down | 0.22–1.1 m | Just out of view | 148 / 59 / 17 px |
 
-These are geometry estimates; check them on the real mount. Mount the camera on a short post with its 1/4-20 tripod thread, 30–40 cm up, tilted about 40° down. Keep the arm's `ready` pose out of its view. **After ACT demos are recorded, no camera may move.**
+These are geometry estimates; check them on the real mount. At hour 6 the team chose a low mount: the camera sits at the front of the deck, about 7–12 cm up and tilted about 20° down, so the floor fills the picture up to the horizon. That limits detection to about 1 m (estimate; measure in P3). A post 30–40 cm up, tilted about 40° down, is the fallback if the range is too short. Keep the arm's `ready` pose out of its view. **After ACT demos are recorded, no camera may move.**
 
 ### 6.4 Tray lift (stretch goal)
 
@@ -581,7 +581,7 @@ flowchart TD
 **Dataset (task P2)**
 
 - Phone only for now; the other items are stretch goals. Aim for 150–300 phone images plus about 50 of empty floor, with look-alikes (remote, wallet, glasses) as negatives.
-- A temporary mount at the final height and tilt (about 35 cm, 40° down) is fine for these photos. P5 adds about 50 photos from the final mount on the venue floor.
+- Take these photos with the camera at its final low height and tilt (about 7–12 cm up, about 20° down; 6.3). Photos taken from other heights still help, but the low ones are the main set. P5 adds about 50 photos from the final mount on the venue floor.
 - Vary position, distance, angle and lighting. Include the phone face up, face down and in different cases, plus empty floor.
 - Label boxes in Roboflow, CVAT or Label Studio.
 
@@ -591,7 +591,7 @@ flowchart TD
 
 **Done when**
 
-1. On the live camera, the phone is detected in 9 of 10 placements between 0.3 and 1.5 m, with no detections on empty floor.
+1. On the live camera, the phone is detected in 9 of 10 placements between 0.3 and 1.0 m (the low camera's range, 6.3), with no detections on empty floor.
 2. Messages arrive at 10 Hz or faster.
 
 ### 10.4 Floor mapping, parking and search (SW2)
@@ -611,7 +611,7 @@ flowchart TD
 3. Stop when the phone is within `parking_tolerance_m`, or if it's lost for more than 1 s.
 4. Measure the parking precision (10 tries) and post it: ACT recording uses it.
 
-**Search (`brain/search.py`).** Turn in steps of about 30°, pausing to look, until the phone is seen with confidence ≥ 0.6 for 5 frames in a row. Give up after two full turns.
+**Search (`brain/search.py`).** Turn in steps of about 30°, pausing to look, until the phone is seen with confidence ≥ 0.6 for 5 frames in a row. Give up after two full turns. With the low camera the phone has to be within about 1 m to be seen.
 
 **Done when** the robot parks within ±2–3 cm in 8 of 10 tries from 1 m away, and the scripted pick then succeeds from that parked position.
 
@@ -727,16 +727,16 @@ IDs are referenced on the board. **Depends on** must be done first. Gate tasks (
 | P3 | Train YOLO v1; `perception/publish.py` sends 9.2 | SW2 | P2 | 9/10 live detections |
 | P4 | Floor homography + parking spot measured | SW2 | P3, A3 | `floor_m` within 2 cm at 3 test points |
 | P5 | Venue floor top-up (about 50 photos), retrain | SW2 | P3 | Detection holds on the venue floor |
-| B1 | Deck, drive wheels, casters built | HW1 | — | Pushes and turns freely by hand |
+| B1 | Deck and four wheels built (two driven; casters advised for the other two, D10) | HW1 | — | Pushes and turns freely by hand |
 | B2 | Power distribution, E-stop, fuses, buck converter, capacitor | HW1 | B1 | E-stop cuts all 12 V loads |
 | B3 | ESP32 firmware: drive, watchdog, protocol | SW2 | B2 (bench is fine) | 10.5 bench checks pass |
 | B4 | `base/driver.py` + fake serial + tests | SW2 | S6 | Tests pass without the ESP32 |
 | B5 | Parking controller on the real base | SW2 | B3, B4, P4 | ±2–3 cm, 8/10 |
-| B6 | Search behaviour | SW2 | B5 | Finds the phone from any heading within 1.5 m |
+| B6 | Search behaviour | SW2 | B5 | Finds the phone from any heading within 1 m (low camera, 6.3) |
 | L1 | Mast, carriage, belt, limit switch, tray, load cell built | HW2 (stretch) | — | Tray moves smoothly by hand |
 | L2 | Lift and load cell firmware (`LIFT_*`, `TRAY`, `TARE`) | SW2 (stretch) | L1, B3 | ±5 mm, 5/5 |
 | L3 | Hand height: v1 presets, then v2 MediaPipe | SW1 (stretch) | L2, C3 | 10.6 checks pass |
-| C1 | Front camera post: 30–40 cm, about 40° down | HW2 | B1 | Grab spot visible in the RealSense picture |
+| C1 | Front camera low mount: front of the deck, about 7–12 cm up, about 20° down | HW2 | B1 | Grab spot visible in the RealSense picture |
 | C2 | Wrist camera mount (weighed) | HW2 | — | Mounted, under the weight limit |
 | C3 | Mast-top camera mount | HW2 (stretch) | L1 | Sees a seated hand at every tray height |
 | C4 | Fingertip pads | HW2 | A5 | Pen and phone tests pass |
@@ -775,7 +775,7 @@ IDs are referenced on the board. **Depends on** must be done first. Gate tasks (
 | Part | Qty | Spec | Status |
 |---|---|---|---|
 | Intel RealSense D435 | 1 | Front camera | Have |
-| Front camera post | 1 | 30–40 cm, about 40° down, 1/4-20 screw | Decided |
+| Front camera mount | 1 | Low, at the front of the deck, about 7–12 cm up, about 20° down, 1/4-20 screw | Decided (hour 6) |
 | Wrist camera | 1 | Small USB camera, about 640×480, light | Open (D3) |
 | Wrist camera mount + diffused 5 V LED | 1 | Printed | Decided |
 | Deck webcam for ACT | 1 | C920-class | Open (D4) |
@@ -791,7 +791,7 @@ IDs are referenced on the board. **Depends on** must be done first. Gate tasks (
 | TMC2209 drivers (drive) | 2 | | Decided |
 | Wheels + hubs for 5 mm shafts | 2 | 72–90 mm | Decided |
 | Motor brackets | 2 | | Decided |
-| Ball casters | 2 | Back corners | Decided |
+| Ball or swivel casters | 2 | To replace the two fixed wheels (D10) | Advised |
 
 **Tray lift**
 
@@ -864,6 +864,7 @@ flowchart LR
 | D7 | Power source | Tether or battery | HW1 | Tether for the event; battery only if everything else is done. |
 | D8 | Training backup | PC only, or PC + cloud GPU | SW1 | If the PC is busy at the event, book cloud time. |
 | D9 | Grip while presenting | Full squeeze or light hold | SW1 | A5 pull test: can a seated person pull the phone out easily, and does it stay put for 60 s? |
+| D10 | Non-driven wheels | Keep the two fixed wheels, or swap them for swivel or ball casters | HW1 (Darren) | Turn the base in place on serial commands. If it turns jerkily, stalls, or parking (B5) misses ±2–3 cm, swap them. |
 
 ---
 
@@ -1057,7 +1058,7 @@ Update the board with an owner and estimated ready time for each blocked handoff
 
 | Bottleneck / handoff | Who must coordinate | What it blocks | Evidence needed to unblock | Work possible while waiting |
 |---|---|---|---|---|
-| **D435 access, USB 3 and final front mount (S4/P1/C1)** | HW1 provides the base; HW2 fixes the mount; SW2 validates capture | P2 photos → P3 detector → P4 mapping → B5 parking | Real colour/depth capture and P1 fps result; mount 30–40 cm high at about 40° down; grab spot visible; geometry recorded | Reader/fake-camera tests, B4 fake serial, labelling setup. Synthetic images do not satisfy P2/P3 |
+| **D435 access, USB 3 and final front mount (S4/P1/C1)** | HW1 provides the base; HW2 fixes the mount; SW2 validates capture | P2 photos → P3 detector → P4 mapping → B5 parking | Real colour/depth capture and P1 fps result; low mount about 7–12 cm up at about 20° down; grab spot visible; geometry recorded | Reader/fake-camera tests, B4 fake serial, labelling setup. Synthetic images do not satisfy P2/P3 |
 | **Power, drive wiring and E-stop (B1/B2 → B3)** | HW1 + SW2 | Real drive/watchdog checks, B5/B6 and M2 | Confirmed pin map, driver settings, wheel size/track width; common ground and E-stop checked; real commands and USB-loss watchdog pass | Firmware review and driver simulation; no powered motion until the person clears the area |
 | **Mast, home switch and load cell (L1 → L2), stretch** | HW2 + SW2; HW1 for power | The stretch tray lift only | Switch polarity, travel limits, load-cell wiring and calibration recorded; home/height repeatability ±5 mm, 5/5; taken-item checks pass | Fake lift/weight scenarios and preset UI; never equate fake completion with load-bearing acceptance |
 | **Final arm geometry (G2 → A6 → P4/B5)** | HW1/HW2 secure mounts; SW1 teaches; SW2 measures | Accurate parking and repeatable floor-to-hand picks | Re-taught poses on final base, reachable present pose, measured grab spot; homography within 2 cm at 3 points; parking ±2–3 cm in 8/10 trials | Simulated arm/parking tests. A moved mount invalidates the relevant measurements |
@@ -1080,7 +1081,7 @@ At hour 6, SW1 decided that the tray and lift are a stretch goal and that the ar
 
 | Time | SW1 + Claude | SW2 + Codex | HW1 (Darren) | HW2 (ClassicDQ) |
 |---|---|---|---|---|
-| 00:30–01:30 (h6–7) | Merge PRs; mock deck; A5 claw test (flat phone, face up and down, cases, present-pose hold, pull test) → D1, D9 | P2 photos: RealSense on a temporary 35 cm, 40° mount; 150–300 new phone images plus about 50 empty-floor images plus look-alike negatives (remote, wallet, glasses) | B1 drive motors, wheels, casters | C1 front camera post (final) |
+| 00:30–01:30 (h6–7) | Merge PRs; mock deck; P2 photos at the low camera height (with SW2); A5 claw test (flat phone, face up and down, cases, present-pose hold, pull test) → D1, D9 | P2 photos with the RealSense at its final low height (about 7–12 cm, about 20° down); 150–300 new phone images plus about 50 empty-floor images plus look-alike negatives (remote, wallet, glasses) | B1 drive motors, wheels, casters | C1 front camera post (final) |
 | 01:30–03:30 (h7–9) | A3 teach (with `present`), A4 pick-present-take 3/3 slow then normal; T1/T2 rehearsal (5 throwaway demos, 200-step run) if the PC is reachable. Claude builds A7. | Label and check (REQ-claude-4), P3 YOLO v1 on the PC; B3 wheels-only firmware and B4 driver with Darren | B2 power, E-stop, fuses (no lift branch); B3 wiring with SW2 | C2 wrist camera mount (weighed); arm mount plate with HW1 |
 | 03:30–08:30 (h9–14) | Sleep | Per 14.4 | Per 14.4 | Per 14.4 |
 | 04:30 (h10) | **G1** (SW1's bench result posted before sleeping) | | | |
@@ -1195,6 +1196,8 @@ Requests for you:
 | The claw can't hold the phone up or let go to a pull | Medium | High | Test it in A5; fingertip pads; a lighter hold (D9); suction (C5, stretch) |
 | The phone slips while presenting and counts as taken | Medium | Medium | Firm grip and pads; the person catches it |
 | The present height is too low for a seated person | Medium | Medium | The robot parks close to the chair; the tray lift (stretch) |
+| Fixed wheels scrape when turning, so turns and parking are imprecise | High | High | Swap for swivel or ball casters (D10); slow turns; the camera closes the loop on the phone's position while parking |
+| The low camera only sees a flat phone out to about 1 m | High | Medium | Demo with the phone within 1 m; train YOLO at imgsz 1280; fall back to a 30–40 cm post (6.3) |
 | RealSense flakiness on macOS (sudo, first-access failures) | Medium | Medium | Retries in P1; keep a USB webcam as a backup front camera |
 | ACT isn't reliable in time | Medium | Medium | The scripted grasp is the demo; ACT only replaces it if it beats it on 10 picks |
 | Parking too imprecise for the grasp | Medium | High | Slow final approach; widen the ACT demo spread; small `--pan` correction from the detection |
@@ -1212,7 +1215,7 @@ Requests for you:
 
 Target: under 60 seconds from request to hand-off.
 
-1. A person sits in the demo chair; a phone lies on the floor about 1 m in front of the robot.
+1. A person sits in the demo chair; a phone lies on the floor within about 1 m in front of the robot (the low camera's range).
 2. They type or say: "I dropped my phone."
 3. The page shows "Looking for: phone". The robot turns, spots the phone and creeps up to it.
 4. The arm reaches down, picks the phone up and raises it to the person.
