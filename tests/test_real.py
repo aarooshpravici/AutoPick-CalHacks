@@ -35,9 +35,13 @@ class OldFakeConfig:                    # a LeRobot without disable_torque_on_di
 class FakeBus:
     """Records register writes and torque-enables in order, like the Feetech bus would see them."""
 
-    def __init__(self):
+    def __init__(self, port="/dev/ttyFAKE", motors=None, calibration=None, protocol_version=0):
+        """Same signature as FeetechMotorsBus, so RealArm can rebuild it without frozen motors."""
+        self.port = port
+        self.motors = dict(motors) if motors is not None else {j: i + 1 for i, j in enumerate(JOINTS)}
+        self.calibration = dict(calibration) if calibration is not None else {j: f"cal-{j}" for j in self.motors}
+        self.protocol_version = protocol_version
         self.disconnects = []
-        self.motors = {j: i + 1 for i, j in enumerate(JOINTS)}
         self.present = {j: 1800 + 37 * i for i, j in enumerate(JOINTS)}   # raw ticks, not a stale goal
         self.log = []
         self.is_connected = False
@@ -227,3 +231,34 @@ def test_an_integer_step_cap_from_robot_yaml_is_passed_as_a_float(new_layout):
     arm = RealArm("/dev/ttyFAKE", "so101_follower_arm", 10)
     assert isinstance(FakeFollower.instances[-1].config.max_relative_target, float)
     arm.command({j: 0.0 for j in JOINTS})                  # the first command no longer raises
+
+
+# --- frozen joints: servo 5 (wrist_roll) is never called -----------------------------
+
+def test_a_frozen_joint_is_never_called(new_layout):
+    arm = RealArm("/dev/ttyFAKE", "so101_follower_arm", 10, frozen=["wrist_roll"])
+    robot = FakeFollower.instances[-1]
+    assert "wrist_roll" not in robot.bus.motors and "wrist_roll" not in robot.bus.calibration
+    assert set(robot.bus.motors) == set(JOINTS) - {"wrist_roll"}
+    arm.command({j: 1.0 for j in JOINTS})
+    assert all(e[2] != "wrist_roll" for e in robot.bus.log if e[0] == "write")   # no register writes
+    assert "wrist_roll.pos" not in robot.actions[-1]                              # no goal sent
+    assert set(robot.actions[-1]) == {f"{j}.pos" for j in JOINTS if j != "wrist_roll"}
+
+
+def test_a_frozen_joint_reads_as_a_constant(new_layout):
+    arm = RealArm("/dev/ttyFAKE", "so101_follower_arm", 10, frozen=("wrist_roll",))
+    pos = arm.read()
+    assert pos["wrist_roll"] == 0.0 and set(pos) == set(JOINTS)
+    assert pos["elbow_flex"] == 2.5                                               # others still real
+
+
+@pytest.mark.parametrize("bad", [["gripper"], ["elbow"], ["shoulder_pan", "pinky"]])
+def test_only_arm_joints_can_be_frozen(new_layout, bad):
+    with pytest.raises(ValueError, match="frozen joints"):
+        RealArm("/dev/ttyFAKE", "so101_follower_arm", 10, frozen=bad)
+
+
+def test_nothing_frozen_keeps_the_full_bus(new_layout):
+    RealArm("/dev/ttyFAKE", "so101_follower_arm", 10)
+    assert set(FakeFollower.instances[-1].bus.motors) == set(JOINTS)

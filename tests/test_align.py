@@ -168,3 +168,16 @@ def test_not_a_terminal_prints_only_when_the_table_changes():
     out = io.StringIO()
     align.live_align(Still(READY), Still(READY), enter=presses(*[False] * 20, True), out=out, max_s=5)
     assert out.getvalue().count("joint ") == 1                # 21 refreshes, one unchanged table
+
+
+
+def test_a_frozen_joint_is_ignored_when_lining_up():
+    follower = Still(READY)
+    follower.frozen = ("wrist_roll",)
+    leader = Still({**READY, "wrist_roll": READY["wrist_roll"] + 90})     # way off, but frozen
+    out = io.StringIO()
+    align.live_align(leader, follower, enter=presses(True), out=out, max_s=5)
+    text = out.getvalue()
+    assert "frozen" in text and "not used" in text and text.rstrip().endswith("Starting.")
+    assert follower.commands == []
+    assert align.mismatched({**READY, "wrist_roll": 90}, READY, ignore=("wrist_roll",)) == []

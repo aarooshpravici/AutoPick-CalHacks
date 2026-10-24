@@ -8,6 +8,7 @@ arm:
   leader_id: so101_leader_arm_b      # matches the leader's motors (checked 2026-10-24); so101_leader_arm.json no longer does
   max_relative_target_deg: 10
   move_speed_deg_s: 45               # Override to 25 for first real runs.
+  frozen_joints: [wrist_roll]           # servo 5 is faulty (drives one way, browns out the bus): never called
 cameras:                             # Fixed ACT names; verify indices after replugging.
   wrist: 1
   scene: 2                           # Optional; recording enables it explicitly.
