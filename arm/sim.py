@@ -4,13 +4,19 @@ Joints slide toward their targets. A closing claw stops on the "object" when the
 arm is at the at_object pose. Options make the first N grasps miss, make the
 object slip out while lifting, or freeze one joint (to test "stuck").
 
+Grip: while the object is in the claw and the claw target is past it, the claw
+stops at the object's width (object_width above closed), whatever the target, so
+the full squeeze and the light hold (pick.LIGHT_SQUEEZE past the object) read the
+same. Once the object is gone, the claw moves on to its target: fully closed when
+squeezing, a few units closed from where it held the object in a light hold.
+
 Hand-off: once the arm has arrived at the present pose (every joint at its goal)
 and held the object there for take_after_s, the person takes it. The object is
-gone, so the squeezing claw closes fully. never_take=True: nobody takes it (to
+gone, so the claw closes onto its target. never_take=True: nobody takes it (to
 test the timeout). slip_at_present_after_s: the object falls out that long after
-arriving, and the claw closes fully just the same. pick.py reports that as
-"dropped" within pick.TAKE_SETTLE_S of arriving; later it can't be told from a
-take (the known limit in plan 10.7).
+arriving, and the claw closes just the same. pick.py reports that as "dropped"
+within pick.TAKE_SETTLE_S of arriving; later it can't be told from a take (the
+known limit in plan 10.7).
 
 The sim runs on a virtual clock: pick.py sleeps through arm.clock, and each sleep
 advances the simulation instead of waiting, so a whole pick takes milliseconds.

@@ -1,25 +1,32 @@
 """Pick sequence: floor -> the person's hand, or (stretch) the tray (plan 9.4, 10.1, 10.6).
 
     result = pick_to_hand(arm, poses, pan_deg=0.0, roll_deg=0.0, policy=None, speed_deg_s=45,
-                          handoff_timeout_s=60, stop_event=None, on_state=None)
+                          handoff_timeout_s=60, stop_event=None, on_state=None, handoff_grip="squeeze")
     result = pick_to_tray(arm, poses, pan_deg=0.0, roll_deg=0.0, policy=None, speed_deg_s=45)
 
     python -m arm.pick run [--to hand|tray] [--policy DIR] [--pan DEG] [--roll DEG]
-                           [--speed DEG_S] [--handoff-timeout S] [--dry-run]
+                           [--speed DEG_S] [--handoff-timeout S] [--handoff-grip squeeze|light]
+                           [--dry-run]
 
 The last printed line is `RESULT {json}`. Exit codes: 0 taken or in_tray, 1 error or
 stopped, 2 missed, 3 dropped, 4 stuck, 5 timeout. The default is --to hand.
 
 Hand-off (pick_to_hand): after the grasp the arm carries the object up to `lift`, then
 to `present` at no more than PRESENT_SPEED_DEG_S (a person is near, plan 17), and holds
-it there, still squeezing. When the person pulls it out, the claw closes fully: read on
-the closed side TAKE_READS times in a row (at TAKE_POLL_HZ), that is a take, and the
-arm opens the claw and goes back to `ready` ("taken"). The person reaches only once
+it there. The claw's reading on arriving there, holding, is `hold_pos`. handoff_grip
+(robot.yaml handoff.grip, decision D9) sets the grip while it waits: "squeeze" keeps
+the carry squeeze; "light" commands the claw only LIGHT_SQUEEZE past hold_pos (never
+past the carry squeeze), so it presses less hard and is easier to pull from. Every
+carry move squeezes in both modes; only the wait at `present` differs. When the person
+pulls the object out, the claw closes onto its target. A read on the closed side, or at
+least TAKE_CLOSE_UNITS closed from hold_pos (a light hold stops short of the closed
+side), counts as closed; TAKE_READS closed reads in a row (at TAKE_POLL_HZ) are a take,
+and the arm opens the claw and goes back to `ready` ("taken"). The person reaches only once
 the arm has stopped (plan 17), so a claw that starts closing within TAKE_SETTLE_S of
 arriving lost the object on its own ("dropped"), as does a claw that reads open for
 TAKE_READS reads in a row. A slip later than that looks exactly like a take (known
 limit, plan 10.7). If nobody takes it within handoff_timeout_s (robot.yaml
-handoff.timeout_s), the arm goes back to `lift`, still holding ("timeout"; "dropped"
+handoff.timeout_s), the arm goes back to `lift`, squeezing again ("timeout"; "dropped"
 if the claw no longer holds it there). The moves away from `present` run at the same
 lower speed.
 on_state, if given, is called with "pick" at the start, "present" as the move to
@@ -79,6 +86,9 @@ PRESENT_SPEED_DEG_S = 25.0      # plan section 17: moves to and from `present` a
 TAKE_POLL_HZ = 20               # claw reads while waiting for the take
 TAKE_READS = 6                  # reads in a row (about 0.3 s) that decide a take or a drop
 TAKE_SETTLE_S = 1.0             # nobody reaches this soon after the arm stops: closing then is a slip
+HANDOFF_GRIPS = ("squeeze", "light")    # grip while waiting at `present` (robot.yaml handoff.grip, D9)
+LIGHT_SQUEEZE = 6.0             # light grip: command the claw this far past where it holds the object
+TAKE_CLOSE_UNITS = 4.0          # closed this far from where it held the object = closed (below LIGHT_SQUEEZE)
 DEFAULT_CONFIG_PATH = REPO_ROOT / "config" / "robot.yaml"
 
 EXIT_CODES = {"taken": 0, "in_tray": 0, "stopped": 1, "error": 1, "missed": 2, "dropped": 3, "stuck": 4,
@@ -262,13 +272,25 @@ class _Picker:
         stopped = self.set_grip(self.g_squeeze)
         return stopped and self.holding()
 
-    def wait_for_take(self, timeout_s: float) -> str:
-        """Hold still at the present pose, still squeezing, and read the claw at TAKE_POLL_HZ.
-        Returns "taken" once it reads on the closed side TAKE_READS times in a row (the person
-        pulled the object out and the claw closed on nothing), or "dropped" if that closing
-        began within TAKE_SETTLE_S of arriving (nobody had reached yet: it slipped out) or the
-        claw reads open TAKE_READS times in a row. "timeout" if timeout_s passes first."""
-        self.log("wait for take")
+    def _light_target(self, hold_pos: float) -> float:
+        """The light grip's claw target: LIGHT_SQUEEZE past hold_pos, never past g_squeeze."""
+        target = hold_pos - self.dir * LIGHT_SQUEEZE
+        return target if (target - self.g_squeeze) * self.dir >= 0 else self.g_squeeze
+
+    def _reads_closed(self, gripper: float, hold_pos: float) -> bool:
+        """On the closed side, or at least TAKE_CLOSE_UNITS closed from hold_pos."""
+        return self._closed_side(gripper) or (hold_pos - gripper) * self.dir >= TAKE_CLOSE_UNITS
+
+    def wait_for_take(self, timeout_s: float, hold_pos: float, grip: str = "squeeze") -> str:
+        """Hold still at the present pose and read the claw at TAKE_POLL_HZ. hold_pos is where
+        the claw read on arriving, holding. grip "squeeze" keeps squeezing; "light" commands
+        _light_target(hold_pos) instead. Returns "taken" once the claw reads closed (on the
+        closed side, or TAKE_CLOSE_UNITS closed from hold_pos) TAKE_READS times in a row (the
+        person pulled the object out and the claw closed on nothing), or "dropped" if that
+        closing began within TAKE_SETTLE_S of arriving (nobody had reached yet: it slipped out)
+        or the claw reads open TAKE_READS times in a row. "timeout" if timeout_s passes first."""
+        self.log(f"wait for take ({grip} grip)")
+        target = self.g_squeeze if grip == "squeeze" else self._light_target(hold_pos)
         dt = 1.0 / TAKE_POLL_HZ
         closed = opened = 0
         closed_since = None
@@ -278,16 +300,17 @@ class _Picker:
             if now - t0 >= timeout_s:
                 return "timeout"
             self._check_stop()
-            # Re-send the carry target at every read: LeRobot caps each command's step
+            # Re-send the claw target at every read: LeRobot caps each command's step
             # (max_relative_target), so one command alone would stop the claw short of closed.
-            self._send(self.joint_cmd, self.g_squeeze)
+            self._send(self.joint_cmd, target)
             g = self.arm.read()["gripper"]
-            if self._closed_side(g):
+            is_closed = self._reads_closed(g, hold_pos)
+            if is_closed:
                 closed_since = now if closed == 0 else closed_since
                 closed += 1
             else:
                 closed = 0
-            opened = 0 if self._closed_side(g) or claw_holding(g, self.g_open, self.g_closed) else opened + 1
+            opened = 0 if is_closed or claw_holding(g, self.g_open, self.g_closed) else opened + 1
             if closed >= TAKE_READS:
                 if closed_since - t0 < TAKE_SETTLE_S:
                     self.log("claw closed before anyone could reach: the object slipped out")
@@ -345,14 +368,15 @@ class _Picker:
         self.move("ready", self.g_open)
         result["detail"] = "released over the tray"
 
-    def run_hand(self, policy, result: dict, timeout_s: float, on_state) -> None:
+    def run_hand(self, policy, result: dict, timeout_s: float, on_state, grip: str = "squeeze") -> None:
         on_state("pick")
         self.pick_up(policy, result)
         near_person = min(self.speed, PRESENT_SPEED_DEG_S)
         on_state("present")
         self.carry("present", speed=near_person)
+        hold_pos = self.arm.read()["gripper"]        # holding: carry() just checked
         on_state("wait_for_take")
-        outcome = self.wait_for_take(timeout_s)
+        outcome = self.wait_for_take(timeout_s, hold_pos, grip)
         if outcome == "dropped":
             self._back_to_ready(near_person)
             raise _Abort("dropped", "object slipped out at the present pose before anyone could take it")
@@ -361,7 +385,7 @@ class _Picker:
             self.move("ready", self.g_open, speed=near_person)
             result["detail"] = "taken at the present pose"
             return
-        self.carry("lift", speed=near_person)       # "timeout" promises it still holds (plan 9.4)
+        self.carry("lift", speed=near_person)       # squeezing again; "timeout" promises it still holds (plan 9.4)
         result["result"] = "timeout"
         result["detail"] = f"not taken within {timeout_s:g} s; holding at lift"
 
@@ -452,16 +476,21 @@ def _pick(mode, sequence, arm, poses, pan_deg, roll_deg, policy, speed_deg_s, st
 
 def pick_to_hand(arm, poses, pan_deg=0.0, roll_deg=0.0, policy=None, speed_deg_s=45,
                  handoff_timeout_s=60, stop_event: threading.Event | None = None, on_state=None,
-                 log=None) -> dict:
+                 log=None, handoff_grip="squeeze") -> dict:
     """Pick the object at the parking spot, present it and wait for the person to take it.
     See the module docstring. Needs the `present` pose (not `above_tray`).
-    stop_event: set it from another thread to stop; the arm holds where it is, still squeezing.
+    stop_event: set it from another thread to stop; the arm holds where it is and keeps its
+    claw target (squeezing, or the light hold while waiting).
     on_state(state) is called with "pick", "present" and "wait_for_take".
+    handoff_grip: "squeeze" or "light", the grip while waiting at `present` (D9).
     policy may be a checkpoint folder: its webcams are opened here and closed at the end."""
     if not (_is_number(handoff_timeout_s) and handoff_timeout_s > 0):
         raise ValueError(f"handoff_timeout_s must be a positive number of seconds, got {handoff_timeout_s!r}")
+    if not (isinstance(handoff_grip, str) and handoff_grip in HANDOFF_GRIPS):
+        raise ValueError(f"handoff_grip must be 'squeeze' or 'light', got {handoff_grip!r}")
     on_state = on_state or (lambda state: None)
-    sequence = functools.partial(_Picker.run_hand, timeout_s=handoff_timeout_s, on_state=on_state)
+    sequence = functools.partial(_Picker.run_hand, timeout_s=handoff_timeout_s, on_state=on_state,
+                                 grip=handoff_grip)
     return _pick("hand", sequence, arm, poses, pan_deg, roll_deg, policy, speed_deg_s, stop_event, log)
 
 
@@ -516,20 +545,35 @@ def load_arm_config(path: str | Path = DEFAULT_CONFIG_PATH,
     return arm
 
 
-def load_handoff_timeout(path: str | Path = DEFAULT_CONFIG_PATH) -> float:
-    """robot.yaml handoff.timeout_s: seconds holding at the present pose before giving up.
-    It must be a positive number (no default). Raises ConfigError."""
-    path = Path(path)
+def _load_handoff(path: Path, key: str):
+    """robot.yaml handoff.<key>, unchecked. Raises ConfigError if the file or section is missing."""
     if not path.exists():
         raise ConfigError(f"{path} not found; robot.yaml comes from task S6 (plan section 9.1)")
     cfg = _load_config(path)
     handoff = cfg.get("handoff") if isinstance(cfg, dict) else None
     if not isinstance(handoff, dict):
-        raise ConfigError(f"{path}: the 'handoff:' section is missing or empty (it needs handoff.timeout_s)")
-    value = handoff.get("timeout_s")
+        raise ConfigError(f"{path}: the 'handoff:' section is missing or empty (it needs handoff.{key})")
+    return handoff.get(key)
+
+
+def load_handoff_timeout(path: str | Path = DEFAULT_CONFIG_PATH) -> float:
+    """robot.yaml handoff.timeout_s: seconds holding at the present pose before giving up.
+    It must be a positive number (no default). Raises ConfigError."""
+    path = Path(path)
+    value = _load_handoff(path, "timeout_s")
     if not _is_number(value) or value <= 0:
         raise ConfigError(f"{path}: handoff.timeout_s must be a positive number of seconds, got {value!r}")
     return float(value)
+
+
+def load_handoff_grip(path: str | Path = DEFAULT_CONFIG_PATH) -> str:
+    """robot.yaml handoff.grip: the claw grip while waiting at the present pose (D9), exactly
+    "squeeze" or "light" (no default). Raises ConfigError."""
+    path = Path(path)
+    value = _load_handoff(path, "grip")
+    if not (isinstance(value, str) and value in HANDOFF_GRIPS):
+        raise ConfigError(f"{path}: handoff.grip must be 'squeeze' or 'light', got {value!r}")
+    return value
 
 
 def load_camera_indices(path: str | Path, names: list[str]) -> dict:
@@ -608,6 +652,9 @@ def _build_parser() -> argparse.ArgumentParser:
     run.add_argument("--handoff-timeout", type=float, metavar="S",
                      help="hand mode: seconds to hold at the present pose before giving up "
                           "(default: robot.yaml handoff.timeout_s)")
+    run.add_argument("--handoff-grip", choices=HANDOFF_GRIPS,
+                     help="hand mode: claw grip while waiting at the present pose, squeeze (firm) or "
+                          "light (default: robot.yaml handoff.grip)")
     run.add_argument("--dry-run", action="store_true", help="simulated arm, no hardware")
     run.add_argument("--camera-size", type=_size, metavar="WxH",
                      help="with --policy: webcam capture size, if a webcam can't deliver the checkpoint's "
@@ -639,8 +686,9 @@ def main(argv=None) -> int:
     parser = _build_parser()
     try:
         args = parser.parse_args(argv)
-        if args.to == "tray" and args.handoff_timeout is not None:
-            parser.error("--handoff-timeout only applies to --to hand")
+        for flag, value in (("--handoff-timeout", args.handoff_timeout), ("--handoff-grip", args.handoff_grip)):
+            if args.to == "tray" and value is not None:
+                parser.error(f"{flag} only applies to --to hand")
     except _ArgError as e:
         policy_given = any(a == "--policy" or a.startswith("--policy=") for a in argv)
         return _finish(_error_result(str(e), "policy" if policy_given else "scripted"))
@@ -661,13 +709,14 @@ def main(argv=None) -> int:
         for flag, value in (("--pan", args.pan), ("--roll", args.roll)):   # before any hardware opens
             if not _is_number(value):
                 raise ValueError(f"{flag} must be a finite number, got {value!r}")
-        timeout = None
+        timeout = grip = None
         if args.to == "hand":
             timeout = args.handoff_timeout
             if timeout is None:
                 timeout = load_handoff_timeout(args.config)
             elif not (_is_number(timeout) and timeout > 0):
                 raise ValueError(f"--handoff-timeout must be a positive number of seconds, got {timeout!r}")
+            grip = args.handoff_grip if args.handoff_grip is not None else load_handoff_grip(args.config)
         if args.dry_run:
             from .sim import DEFAULT_POSES, SimArm
             poses = poses_mod.load(args.poses, args.to) if args.poses.exists() else DEFAULT_POSES
@@ -689,7 +738,7 @@ def main(argv=None) -> int:
         if args.to == "hand":
             result = pick_to_hand(arm, poses, pan_deg=args.pan, roll_deg=args.roll, policy=policy,
                                   speed_deg_s=speed, handoff_timeout_s=timeout, stop_event=stop_event,
-                                  on_state=lambda state: log(f"state {state}"), log=log)
+                                  on_state=lambda state: log(f"state {state}"), log=log, handoff_grip=grip)
         else:
             result = pick_to_tray(arm, poses, pan_deg=args.pan, roll_deg=args.roll, policy=policy,
                                   speed_deg_s=speed, stop_event=stop_event, log=log)

@@ -32,6 +32,7 @@ perception:
   parking_tolerance_m: 0.02
 handoff:
   timeout_s: 60                       # seconds holding at the present pose before giving up
+  grip: squeeze                       # squeeze (firm) or light; decided by the A5 pull test (D9)
 lift:
   seated_hand_mm: 700
   standing_hand_mm: 1000

@@ -30,7 +30,7 @@ ROBOT_YAML = {
         "move_speed_deg_s": 45,
     },
     "cameras": {"wrist": 1, "scene": 2, "mast_top": 3},
-    "handoff": {"timeout_s": 60},
+    "handoff": {"timeout_s": 60, "grip": "squeeze"},
 }
 DROP = object()     # write_config(...=DROP) leaves the key out
 
@@ -933,7 +933,7 @@ def capture_timeout(monkeypatch):
 def test_cli_handoff_timeout_defaults_to_robot_yaml(tmp_path, capsys, monkeypatch, extra, expected):
     seen = capture_timeout(monkeypatch)
     rc, r, _ = run_cli(tmp_path, capsys, "--dry-run", "--sim-never-take", *extra,
-                       config=write_config(tmp_path, handoff={"timeout_s": 7}))
+                       config=write_config(tmp_path, handoff={"timeout_s": 7, "grip": "squeeze"}))
     assert (rc, r["result"]) == (5, "timeout")
     assert seen == [expected]
     assert f"{expected:g} s" in r["detail"]
@@ -999,3 +999,217 @@ def test_load_handoff_timeout(tmp_path):
     assert pick.load_handoff_timeout(write_config(tmp_path, handoff={"timeout_s": 12.5})) == 12.5
     with pytest.raises(pick.ConfigError, match="not found"):
         pick.load_handoff_timeout(tmp_path / "none.yaml")
+
+
+# --- D9: grip while presenting, squeeze or light (plan 10.1, 13) ----------------------
+
+HOLD_POS = SimArm()._object_stop                  # where the sim's claw stops on the object
+LIGHT_TARGET = HOLD_POS - pick.LIGHT_SQUEEZE      # DEFAULT_POSES: closing lowers the value
+
+
+def light(arm, **kwargs):
+    return hand(arm, handoff_grip="light", **kwargs)
+
+
+def test_light_grip_taken_after_a_pull():
+    """Pulled out of a light hold, the claw closes only LIGHT_SQUEEZE, short of the closed side;
+    TAKE_CLOSE_UNITS closed from where it held the object counts as closed."""
+    arm = Recorder(take_after_s=2.0)
+    on_state, seen, _ = watch_states(arm)
+    logs = []
+    r = light(arm, on_state=on_state, log=lambda msg: logs.append((msg, arm.clock.now())))
+    assert (r["result"], r["grasp"], r["attempts"]) == ("taken", "scripted", 1), r["detail"]
+    assert [s[:3] for s in seen] == [("pick", "floor", "ready"), ("present", "held", "lift"),
+                                     ("wait_for_take", "held", "present")]
+    assert arm.object == "hand"
+    assert where(arm) == "ready" and arm.goal["gripper"] == DEFAULT_POSES["gripper_open"]
+    taken_at = next(t for msg, t in logs if msg == "taken")
+    pulled_at = seen[-1][3] + 2.0
+    assert pulled_at < taken_at <= pulled_at + (pick.TAKE_READS + 2) / pick.TAKE_POLL_HZ   # decided promptly
+    assert ("wait for take (light grip)", seen[-1][3]) in logs
+    grips = [c["gripper"] for c in arm.sent]
+    assert set(grips[:seen[-1][4]]) == {DEFAULT_POSES["gripper_open"], SQUEEZE_TARGET}   # carry moves squeeze
+    waiting = grips[seen[-1][4]:grips.index(DEFAULT_POSES["gripper_open"], seen[-1][4])]
+    assert len(waiting) >= 2 * pick.TAKE_POLL_HZ and set(waiting) == {LIGHT_TARGET}
+
+
+def test_light_grip_timeout_goes_back_to_lift_squeezing():
+    arm = Recorder(never_take=True)
+    on_state, seen, _ = watch_states(arm)
+    r = light(arm, handoff_timeout_s=5, on_state=on_state)
+    assert r["result"] == "timeout", r["detail"]
+    assert "5 s" in r["detail"]
+    grips = [c["gripper"] for c in arm.sent]
+    assert set(grips[:seen[-1][4]]) == {DEFAULT_POSES["gripper_open"], SQUEEZE_TARGET}   # carry moves squeeze
+    waiting = grips[seen[-1][4]:]
+    back = waiting.index(SQUEEZE_TARGET)               # the move back to lift squeezes again
+    assert back >= 5 * pick.TAKE_POLL_HZ and set(waiting[:back]) == {LIGHT_TARGET}
+    assert set(waiting[back:]) == {SQUEEZE_TARGET}
+    assert where(arm) == "lift"
+    assert arm.object == "held" and claw_holding(arm.pos["gripper"], DEFAULT_POSES["gripper_open"],
+                                                 DEFAULT_POSES["gripper_closed"])
+
+
+@pytest.mark.parametrize("slip_s", [0.0, 0.5, 0.9])   # 0.9: starts closing just inside TAKE_SETTLE_S
+def test_light_grip_slip_at_present_is_dropped_not_taken(slip_s):
+    """The light hold closes only to LIGHT_TARGET after a slip, short of the closed side,
+    and that still reads as the object slipping out."""
+    arm = SimArm(never_take=True, slip_at_present_after_s=slip_s)
+    on_state, seen, _ = watch_states(arm)
+    r = light(arm, on_state=on_state)
+    assert r["result"] == "dropped"
+    assert r["detail"] == "object slipped out at the present pose before anyone could take it"
+    assert [s[0] for s in seen] == ["pick", "present", "wait_for_take"]
+    assert arm.clock.now() - seen[-1][3] < pick.TAKE_SETTLE_S + 3.0 + 4.0   # no waiting out the timeout
+    assert arm.object == "floor"
+    assert where(arm) == "ready" and arm.goal["gripper"] == DEFAULT_POSES["gripper_open"]
+
+
+class ClawStopsShort(SimArm):
+    """After the take the claw closes only `short` units from where it held the object
+    (on a finger, say), short of the closed side."""
+
+    def __init__(self, short, **kw):
+        super().__init__(**kw)
+        self.short = short
+
+    def step(self, dt):
+        super().step(dt)
+        if self.object == "hand":
+            self.pos["gripper"] = max(self.pos["gripper"], self._object_stop - self.short)
+
+
+@pytest.mark.parametrize("grip", pick.HANDOFF_GRIPS)
+def test_closing_take_close_units_from_the_hold_is_a_take_in_both_grips(grip):
+    arm = ClawStopsShort(pick.TAKE_CLOSE_UNITS)
+    short_of_closed_side = DEFAULT_POSES["gripper_closed"] + pick.GRIP_MARGIN
+    assert arm._object_stop - pick.TAKE_CLOSE_UNITS >= short_of_closed_side
+    r = hand(arm, handoff_grip=grip)
+    assert r["result"] == "taken", r["detail"]
+    assert arm.object == "hand" and where(arm) == "ready"
+
+
+@pytest.mark.parametrize("width, light_squeeze", [(15.0, pick.LIGHT_SQUEEZE), (5.0, pick.LIGHT_SQUEEZE),
+                                                  (5.0, 12.0)])   # 12 past a 5-wide object is past g_squeeze
+@pytest.mark.parametrize("ending", ["taken", "stopped"])
+def test_light_wait_claw_command_stays_near_the_hold(monkeypatch, width, light_squeeze, ending):
+    """While waiting, the claw is never commanded more than LIGHT_SQUEEZE past where it held the
+    object (measured, so it follows the object's width), nor past the full squeeze. STOP keeps
+    that target."""
+    monkeypatch.setattr(pick, "LIGHT_SQUEEZE", light_squeeze)
+    arm = Recorder(object_width=width, never_take=ending == "stopped")
+    on_state, seen, stop = watch_states(arm, "wait_for_take", 40)
+    r = light(arm, on_state=on_state, stop_event=stop if ending == "stopped" else None)
+    assert r["result"] == ending, r["detail"]
+    hold_pos = arm._object_stop
+    expected = max(hold_pos - light_squeeze, SQUEEZE_TARGET)
+    after = [c["gripper"] for c in arm.sent[seen[-1][4]:]]        # the wait, then letting go or STOP
+    assert after.count(expected) >= 20
+    assert all(hold_pos - g <= light_squeeze + 1e-9 and g >= SQUEEZE_TARGET for g in after)
+    if ending == "stopped":
+        assert where(arm) == "present" and arm.object == "held"
+        assert all(arm.goal[j] == arm.pos[j] for j in poses_mod.ARM_JOINTS)
+        assert arm.goal["gripper"] == expected
+
+
+@pytest.mark.parametrize("sim, expected", [({}, "taken"), ({"never_take": True}, "timeout"),
+                                           ({"never_take": True, "slip_at_present_after_s": 0.5}, "dropped")])
+def test_squeeze_grip_is_the_default_and_unchanged(sim, expected):
+    default, squeeze = Recorder(**sim), Recorder(**sim)
+    r = hand(default, handoff_timeout_s=3)
+    assert r["result"] == expected
+    assert hand(squeeze, handoff_timeout_s=3, handoff_grip="squeeze") == r
+    assert squeeze.sent == default.sent
+    assert {c["gripper"] for c in squeeze.sent} == {DEFAULT_POSES["gripper_open"], SQUEEZE_TARGET}
+
+
+@pytest.mark.parametrize("grip", ["firm", "Light", " light", "", None, True, 1])
+def test_rejects_bad_handoff_grip(grip):
+    arm = Recorder()
+    with pytest.raises(ValueError, match="handoff_grip"):
+        hand(arm, handoff_grip=grip)
+    assert arm.sent == []
+
+
+@pytest.mark.parametrize("handoff, words", [
+    (DROP, "'handoff:' section"),
+    ({"timeout_s": 60}, "handoff.grip"),
+    ({"timeout_s": 60, "grip": None}, "handoff.grip"),
+    ({"timeout_s": 60, "grip": ""}, "handoff.grip"),
+    ({"timeout_s": 60, "grip": "firm"}, "handoff.grip"),
+    ({"timeout_s": 60, "grip": "Squeeze"}, "handoff.grip"),
+    ({"timeout_s": 60, "grip": "light "}, "handoff.grip"),
+    ({"timeout_s": 60, "grip": True}, "handoff.grip"),
+    ({"timeout_s": 60, "grip": 6}, "handoff.grip"),
+    ({"timeout_s": 60, "grip": ["light"]}, "handoff.grip"),
+])
+def test_load_handoff_grip_rejects_bad_values(tmp_path, handoff, words):
+    with pytest.raises(pick.ConfigError, match=words.replace(".", r"\.")):
+        pick.load_handoff_grip(write_config(tmp_path, handoff=handoff))
+
+
+def test_load_handoff_grip(tmp_path):
+    assert pick.load_handoff_grip(write_config(tmp_path)) == "squeeze"
+    assert pick.load_handoff_grip(write_config(tmp_path, handoff={"timeout_s": 60, "grip": "light"})) == "light"
+    with pytest.raises(pick.ConfigError, match="not found"):
+        pick.load_handoff_grip(tmp_path / "none.yaml")
+
+
+def capture_grip(monkeypatch):
+    seen = []
+    real = pick.pick_to_hand
+
+    def spy(*args, **kwargs):
+        seen.append(kwargs["handoff_grip"])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(pick, "pick_to_hand", spy)
+    return seen
+
+
+@pytest.mark.parametrize("config_grip, extra, expected", [
+    ("squeeze", [], "squeeze"),
+    ("light", [], "light"),
+    ("squeeze", ["--handoff-grip", "light"], "light"),
+    ("light", ["--handoff-grip", "squeeze"], "squeeze"),
+])
+def test_cli_handoff_grip_defaults_to_robot_yaml(tmp_path, capsys, monkeypatch, config_grip, extra, expected):
+    seen = capture_grip(monkeypatch)
+    rc, r, out = run_cli(tmp_path, capsys, "--dry-run", *extra,
+                         config=write_config(tmp_path, handoff={"timeout_s": 60, "grip": config_grip}))
+    assert (rc, r["result"]) == (0, "taken"), r["detail"]
+    assert seen == [expected]
+    assert f"wait for take ({expected} grip)" in out
+
+
+def test_cli_light_grip_timeout(tmp_path, capsys):
+    rc, r, out = run_cli(tmp_path, capsys, "--dry-run", "--handoff-grip", "light", "--sim-never-take",
+                         "--handoff-timeout", "3")
+    assert (rc, r["result"]) == (5, "timeout"), r["detail"]
+    assert "wait for take (light grip)" in out
+
+
+@pytest.mark.parametrize("handoff", [{"timeout_s": 60}, {"timeout_s": 60, "grip": "firm"}])
+@pytest.mark.parametrize("mode", ["dry", "real"])
+def test_cli_bad_handoff_grip_config_is_a_clear_error_in_hand_mode_only(tmp_path, capsys, monkeypatch,
+                                                                        fake_real_arm, handoff, mode):
+    seen = capture_grip(monkeypatch)
+    extra = ["--dry-run"] if mode == "dry" else []
+    config = write_config(tmp_path, handoff=handoff)
+    rc, r, _ = run_cli(tmp_path, capsys, "--poses", str(fake_real_arm), *extra, config=config)
+    assert (rc, r["result"]) == (1, "error")
+    assert r["detail"].startswith("ConfigError:") and "handoff.grip" in r["detail"]
+    assert seen == [] and NoHardware.opened == []
+    rc, r, _ = run_cli(tmp_path, capsys, "--poses", str(fake_real_arm), "--to", "tray", *extra, config=config)
+    assert (rc, r["result"]) == (0, "in_tray")        # tray mode doesn't use it
+
+
+@pytest.mark.parametrize("extra, words", [(["--handoff-grip", "firm"], "--handoff-grip"),
+                                          (["--handoff-grip", "Light"], "--handoff-grip"),
+                                          (["--to", "tray", "--handoff-grip", "light"], "--to hand")])
+def test_cli_bad_handoff_grip_flag_is_an_argument_error(tmp_path, capsys, monkeypatch, fake_real_arm, extra, words):
+    seen = capture_grip(monkeypatch)
+    rc, r, _ = run_cli(tmp_path, capsys, *extra, "--poses", str(fake_real_arm))
+    assert (rc, r["result"]) == (1, "error")
+    assert "--handoff-grip" in r["detail"] and words in r["detail"]
+    assert seen == [] and NoHardware.opened == []

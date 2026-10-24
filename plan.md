@@ -514,7 +514,10 @@ flowchart TD
 
 - While carrying, command the claw a few units *past* closed. That keeps squeezing.
 - Send the closing target straight away at the start of every move. Never ramp it from the claw's current position: that loosens the grip at the start of every move and drops the object.
-- **Grip while presenting:** decided by the A5 pull test (full squeeze or a lighter hold) and recorded as D9.
+- **Grip while presenting (D9):** a switch, `handoff.grip` in `robot.yaml`: `squeeze` or `light` (`--handoff-grip` overrides it for one run). The default stays `squeeze` until the A5 pull test decides.
+  - `squeeze`: the claw keeps the carry squeeze while waiting at `present`.
+  - `light`: on arriving at `present`, holding, the arm records where the claw stopped on the object (`hold_pos`). While waiting it commands the claw only `LIGHT_SQUEEZE` (6) units past `hold_pos`, never past the full squeeze, so it presses less hard. Every carry move, including the move back to `lift` after a timeout, still squeezes fully.
+  - **Taken, in both modes:** a claw read counts as closed when it is on the closed side, or at least `TAKE_CLOSE_UNITS` (4) units closed from `hold_pos`. In `light` mode the claw closes only about 6 units once the phone is pulled out, short of the closed side, so the second rule is what sees the take. 6 closed reads in a row are a take. Closing that starts within 1 s of arriving is still a slip ("dropped").
 
 **Arrival checks**
 
@@ -863,7 +866,7 @@ flowchart LR
 | D6 | Deck material | Plywood, acrylic, 2020 frame | HW1 | What's available and quickest to cut. |
 | D7 | Power source | Tether or battery | HW1 | Tether for the event; battery only if everything else is done. |
 | D8 | Training backup | PC only, or PC + cloud GPU | SW1 | If the PC is busy at the event, book cloud time. |
-| D9 | Grip while presenting | Full squeeze or light hold | SW1 | A5 pull test: can a seated person pull the phone out easily, and does it stay put for 60 s? |
+| D9 | Grip while presenting | Full squeeze or light hold: `handoff.grip` in `robot.yaml`, `squeeze` or `light` (10.1). It stays `squeeze` until A5 decides. In `light` mode, taken = the claw closes at least 4 units from where it held the phone (or reaches the closed side) for 6 reads in a row. | SW1 | A5 pull test: can a seated person pull the phone out easily, and does it stay put for 60 s? |
 | D10 | Drive motors and turning | Stepper or DC motors; left/right pairs or four channels; keep the corner wheel spacing or shorten it | HW1 (Darren) + SW2 | Darren confirms the motors and wiring, and SW2 adapts B3. Then turn the base in place on serial: if it struggles or stalls, shorten the wheelbase or change the tyres. |
 
 ---
