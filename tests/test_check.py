@@ -467,6 +467,33 @@ def test_poses_without_above_tray_pass_hand_mode_but_fail_tray_mode(setup):
     assert "python -m arm.teach --with-tray" in failed.hints[0]
 
 
+def test_a_suction_only_poses_file_passes_suction_mode_and_fails_the_claw_modes(setup):
+    suction = {k: v for k, v in DEFAULT_POSES.items() if k == "ready" or k.startswith("suction_")}
+    setup.poses.write_text(json.dumps(suction))
+    ok = one(setup.checks("suction"), "poses file valid for suction mode", OK)
+    assert "suction_press" in ok.text
+    for mode in ("hand", "tray"):
+        assert "is missing" in one(setup.checks(mode), "poses file", FAIL).text
+
+
+def test_poses_without_the_suction_poses_fail_suction_mode_with_the_teach_hint(setup):
+    poses = {k: v for k, v in DEFAULT_POSES.items() if not k.startswith("suction_")}
+    setup.poses.write_text(json.dumps(poses))
+    failed = one(setup.checks("suction"), "poses file", FAIL)
+    assert "pose 'suction_above' is missing; suction mode needs it" in failed.text
+    assert "re-teach with python -m arm.teach --grasp suction" in failed.hints[0]
+    assert one(setup.checks("hand"), "poses file valid for hand mode", OK)
+
+
+def test_the_mode_flag_accepts_suction_and_does_not_need_the_handoff_settings(setup, capsys):
+    data = yaml.safe_load(setup.config.read_text())
+    del data["handoff"]
+    setup.config.write_text(yaml.safe_dump(data))
+    code, out = setup.run(capsys, "--to", "suction")
+    assert "suction mode" in out.splitlines()[0]
+    assert code == 0, out                                   # a missing handoff section only warns
+
+
 def test_poses_that_are_not_json_or_not_an_object_fail(setup):
     setup.poses.write_text("{ not json")
     assert one(setup.checks(), "poses file", FAIL)

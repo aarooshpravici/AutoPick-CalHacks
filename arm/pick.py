@@ -1,11 +1,13 @@
 """Pick sequence: floor -> the person's hand, or (stretch) the tray (plan 9.4, 10.1, 10.6).
 
     result = pick_to_hand(arm, poses, pan_deg=0.0, roll_deg=0.0, policy=None, speed_deg_s=45,
-                          handoff_timeout_s=60, stop_event=None, on_state=None, handoff_grip="squeeze")
+                          handoff_timeout_s=60, stop_event=None, on_state=None, handoff_grip="squeeze",
+                          grasp="claw", suction_dwell_s=2.0, suction_hold_s=4.0)
     result = pick_to_tray(arm, poses, pan_deg=0.0, roll_deg=0.0, policy=None, speed_deg_s=45)
 
-    python -m arm.pick run [--to hand|tray] [--policy DIR] [--pan DEG] [--roll DEG]
-                           [--speed DEG_S] [--handoff-timeout S] [--handoff-grip squeeze|light]
+    python -m arm.pick run [--to hand|tray] [--grasp claw|suction] [--policy DIR] [--pan DEG]
+                           [--roll DEG] [--speed DEG_S] [--handoff-timeout S]
+                           [--handoff-grip squeeze|light] [--suction-dwell S] [--suction-hold S]
                            [--dry-run]
 
 The last printed line is `RESULT {json}`. Exit codes: 0 taken or in_tray, 1 error or
@@ -45,6 +47,21 @@ claw is squeezed shut, checked like a scripted grasp, and the scripted carry tak
 over. A claw standing still fully closed for 8 frames closed on nothing (a missed
 attempt). The 20 s time limit applies to each attempt; when it runs out the claw
 is closed and checked the same way.
+
+Suction (grasp="suction", --grasp suction; the flat-phone path, since the claw can't get under
+one): a passive suction cup (an Octobuddy) on the gripper, no pump and no sensor. The claw is
+never moved: it is commanded to the gripper value taught in suction_press throughout. The arm
+goes ready -> suction_above -> suction_press (at no more than SUCTION_PRESS_SPEED_DEG_S, so the
+cup lands gently), dwells there for suction_dwell_s so the cup can seal, goes straight back up to
+suction_above (gently) -> suction_lift, then to suction_present (at no more than
+PRESENT_SPEED_DEG_S, a person is near), holds there for suction_hold_s (timed: nothing can sense
+a pull), and goes back to ready. The person pulls the phone off the cup during that hold. It
+needs the suction_* poses and `ready` (arm/poses.py, taught by `python -m arm.teach --grasp
+suction`), not the claw poses or claw values. Because nothing is sensed, a cup that did not stick,
+a phone that fell off and a pull that never came all look like "taken": the RESULT says so in
+`detail`, and callers who must know have to check another way (the camera). STOP holds the arm
+where it is, even while pressed. handoff_timeout_s and handoff_grip belong to the claw and are
+ignored; there is no policy or tray variant.
 
 Speed: config/robot.yaml `arm.move_speed_deg_s` is the ceiling (plan 9.1, 17). The
 command line runs at that speed by default and refuses a larger --speed; first real
@@ -90,6 +107,10 @@ TAKE_SETTLE_S = 1.0             # nobody reaches this soon after the arm stops: 
 HANDOFF_GRIPS = ("squeeze", "light")    # grip while waiting at `present` (robot.yaml handoff.grip, D9)
 LIGHT_SQUEEZE = 6.0             # light grip: command the claw this far past where it holds the object
 TAKE_CLOSE_UNITS = 4.0          # closed this far from where it held the object = closed (below LIGHT_SQUEEZE)
+GRASPS = ("claw", "suction")
+SUCTION_DWELL_S = 2.0           # pressed on the object this long so the cup can seal (bench-tune)
+SUCTION_HOLD_S = 4.0            # timed hold at suction_present for the pull; nothing can sense it
+SUCTION_PRESS_SPEED_DEG_S = 15.0    # onto the phone and straight back up: gentle, whatever --speed is
 DEFAULT_CONFIG_PATH = REPO_ROOT / "config" / "robot.yaml"
 
 EXIT_CODES = {"taken": 0, "in_tray": 0, "stopped": 1, "error": 1, "missed": 2, "dropped": 3, "stuck": 4,
@@ -119,7 +140,9 @@ def claw_holding(gripper: float, g_open: float, g_closed: float, margin: float =
     return (gripper - g_closed) * d >= margin and (g_open - gripper) * d >= 1.0
 
 
-class _Picker:
+class _Mover:
+    """Moving the arm joints between taught poses; what the claw and suction sequences share."""
+
     def __init__(self, arm, poses, pan_deg, roll_deg, speed_deg_s, stop_event, log):
         self.arm = arm
         self.poses = poses
@@ -130,10 +153,6 @@ class _Picker:
         self.log = log
         self.clock = getattr(arm, "clock", None) or RealClock()
         self.dt = 1.0 / RATE_HZ
-        self.g_open = poses["gripper_open"]
-        self.g_closed = poses["gripper_closed"]
-        self.dir = 1.0 if self.g_open > self.g_closed else -1.0
-        self.g_squeeze = self.g_closed - self.dir * SQUEEZE
         self.joint_cmd = None
         self.grip_cmd = None
 
@@ -154,9 +173,6 @@ class _Picker:
         if self.stop_event is not None and self.stop_event.is_set():
             self._hold()
             raise _Abort("stopped", "STOP received; arm holding")
-
-    def holding(self) -> bool:
-        return claw_holding(self.arm.read()["gripper"], self.g_open, self.g_closed)
 
     def _target(self, name: str, offsets: bool) -> dict:
         target = {j: float(self.poses[name][j]) for j in ARM_JOINTS}
@@ -189,6 +205,20 @@ class _Picker:
                     raise _Abort("stuck", f"{name}: " + ", ".join(
                         f"{j} at {pos[j]:.1f} (target {target[j]:.1f})" for j in late))
             self.clock.sleep(self.dt)
+
+
+class _Picker(_Mover):
+    """The claw sequences (pick_to_hand with grasp="claw", pick_to_tray)."""
+
+    def __init__(self, arm, poses, pan_deg, roll_deg, speed_deg_s, stop_event, log):
+        super().__init__(arm, poses, pan_deg, roll_deg, speed_deg_s, stop_event, log)
+        self.g_open = poses["gripper_open"]
+        self.g_closed = poses["gripper_closed"]
+        self.dir = 1.0 if self.g_open > self.g_closed else -1.0
+        self.g_squeeze = self.g_closed - self.dir * SQUEEZE
+
+    def holding(self) -> bool:
+        return claw_holding(self.arm.read()["gripper"], self.g_open, self.g_closed)
 
     def set_grip(self, grip: float) -> bool:
         """Move only the claw; wait until it stops (on an object or at its target).
@@ -397,6 +427,46 @@ class _Picker:
         result["detail"] = f"not taken within {timeout_s:g} s; holding at lift"
 
 
+class _SuctionPicker(_Mover):
+    """The suction sequence (module docstring). The claw is commanded to one value, the gripper
+    taught in suction_press, from the first command to the last."""
+
+    def __init__(self, arm, poses, pan_deg, roll_deg, speed_deg_s, stop_event, log, dwell_s, hold_s):
+        super().__init__(arm, poses, pan_deg, roll_deg, speed_deg_s, stop_event, log)
+        self.dwell_s = dwell_s
+        self.hold_s = hold_s
+        self.claw = float(poses["suction_press"]["gripper"])
+        self.gentle = min(speed_deg_s, SUCTION_PRESS_SPEED_DEG_S)
+
+    def wait(self, seconds: float, what: str) -> None:
+        """Stay where the last move ended, claw included, for `seconds`. STOP ends it."""
+        self.log(f"{what} {seconds:g} s")
+        t0 = self.clock.now()
+        while self.clock.now() - t0 < seconds:
+            self._check_stop()
+            # Re-send the target every tick, as the claw's wait does: LeRobot caps each step.
+            self._send(self.joint_cmd, self.claw)
+            self.clock.sleep(self.dt)
+
+    def run_hand(self, policy, result: dict, on_state) -> None:
+        on_state("pick")
+        result["attempts"] = 1      # one press: with no sensor there is nothing to retry on
+        self.move("ready", self.claw)
+        self.move("suction_above", self.claw, offsets=True)
+        self.move("suction_press", self.claw, offsets=True, speed=self.gentle)
+        self.wait(self.dwell_s, "dwell")
+        self.move("suction_above", self.claw, offsets=True, speed=self.gentle)
+        self.move("suction_lift", self.claw)
+        near_person = min(self.speed, PRESENT_SPEED_DEG_S)
+        on_state("present")
+        self.move("suction_present", self.claw, speed=near_person)
+        on_state("wait_for_take")
+        self.wait(self.hold_s, "hold for the pull")
+        self.move("ready", self.claw, speed=near_person)
+        result["detail"] = (f"suction: pressed {self.dwell_s:g} s, held {self.hold_s:g} s at the present "
+                            f"pose, back at ready; no sensor, so the seal and the pull were not checked")
+
+
 def close_cameras(cameras: dict) -> list[str]:
     """Close every camera, even if one fails. Returns a note per failure."""
     failures = []
@@ -459,9 +529,10 @@ def _camera_size(size) -> tuple[int, int] | None:
 
 
 def _pick(mode, sequence, arm, poses, pan_deg, roll_deg, policy, speed_deg_s, stop_event, log,
-          camera_size=None) -> dict:
-    """Shared by pick_to_hand and pick_to_tray. Checks the arguments and the poses `mode`
-    needs before anything moves, then runs sequence(picker, policy, result).
+          camera_size=None, picker_cls=None) -> dict:
+    """Shared by pick_to_hand (claw or suction) and pick_to_tray. Checks the arguments and the
+    poses `mode` ("hand", "tray" or "suction") needs before anything moves, then runs
+    sequence(picker, policy, result) with a picker_cls (default _Picker) instance.
     policy may be a checkpoint folder: its webcams are opened here and closed at the end,
     at camera_size (width, height) if given, else at the checkpoint's image size."""
     camera_size = _camera_size(camera_size)
@@ -482,9 +553,10 @@ def _pick(mode, sequence, arm, poses, pan_deg, roll_deg, policy, speed_deg_s, st
     if opened:
         policy = load_policy(policy, capture_size=camera_size)    # closes its own cameras if it fails
     try:
-        picker = _Picker(arm, poses, pan_deg, roll_deg, speed_deg_s, stop_event, log or (lambda msg: None))
-        result = {"result": "taken" if mode == "hand" else "in_tray",
-                  "grasp": "policy" if policy is not None else "scripted",
+        picker = (picker_cls or _Picker)(arm, poses, pan_deg, roll_deg, speed_deg_s, stop_event,
+                                         log or (lambda msg: None))
+        result = {"result": "in_tray" if mode == "tray" else "taken",
+                  "grasp": "suction" if mode == "suction" else "policy" if policy is not None else "scripted",
                   "attempts": 0, "seconds": 0.0, "detail": ""}
         t0 = picker.clock.now()
         try:
@@ -502,9 +574,13 @@ def _pick(mode, sequence, arm, poses, pan_deg, roll_deg, policy, speed_deg_s, st
 
 def pick_to_hand(arm, poses, pan_deg=0.0, roll_deg=0.0, policy=None, speed_deg_s=45,
                  handoff_timeout_s=60, stop_event: threading.Event | None = None, on_state=None,
-                 log=None, handoff_grip="squeeze", camera_size=None) -> dict:
+                 log=None, handoff_grip="squeeze", camera_size=None, grasp="claw",
+                 suction_dwell_s=SUCTION_DWELL_S, suction_hold_s=SUCTION_HOLD_S) -> dict:
     """Pick the object at the parking spot, present it and wait for the person to take it.
     See the module docstring. Needs the `present` pose (not `above_tray`).
+    grasp: "claw" (the default) or "suction" (passive cup, timed hold; needs the suction_* poses
+    instead of the claw's, takes no policy, and ignores handoff_timeout_s and handoff_grip).
+    suction_dwell_s / suction_hold_s: seconds pressed on the object, and held at suction_present.
     stop_event: set it from another thread to stop; the arm holds where it is and keeps its
     claw target (squeezing, or the light hold while waiting).
     on_state(state) is called with "pick", "present" and "wait_for_take".
@@ -516,7 +592,19 @@ def pick_to_hand(arm, poses, pan_deg=0.0, roll_deg=0.0, policy=None, speed_deg_s
         raise ValueError(f"handoff_timeout_s must be a positive number of seconds, got {handoff_timeout_s!r}")
     if not (isinstance(handoff_grip, str) and handoff_grip in HANDOFF_GRIPS):
         raise ValueError(f"handoff_grip must be 'squeeze' or 'light', got {handoff_grip!r}")
+    if not (isinstance(grasp, str) and grasp in GRASPS):
+        raise ValueError(f"grasp must be one of {list(GRASPS)}, got {grasp!r}")
     on_state = on_state or (lambda state: None)
+    if grasp == "suction":
+        if policy is not None:
+            raise ValueError("a policy drives the claw; it can't be combined with grasp='suction'")
+        for name, value in (("suction_dwell_s", suction_dwell_s), ("suction_hold_s", suction_hold_s)):
+            if not (_is_number(value) and value > 0):
+                raise ValueError(f"{name} must be a positive number of seconds, got {value!r}")
+        return _pick("suction", functools.partial(_SuctionPicker.run_hand, on_state=on_state), arm, poses,
+                     pan_deg, roll_deg, policy, speed_deg_s, stop_event, log, camera_size,
+                     picker_cls=functools.partial(_SuctionPicker, dwell_s=float(suction_dwell_s),
+                                                  hold_s=float(suction_hold_s)))
     sequence = functools.partial(_Picker.run_hand, timeout_s=handoff_timeout_s, on_state=on_state,
                                  grip=handoff_grip)
     return _pick("hand", sequence, arm, poses, pan_deg, roll_deg, policy, speed_deg_s, stop_event, log,
@@ -683,6 +771,16 @@ def _build_parser() -> argparse.ArgumentParser:
                                      "(or, --to tray, drop it in the tray)")
     run.add_argument("--to", choices=("hand", "tray"), default="hand",
                      help="hand: present it and wait for the take (default); tray: stretch tray mode")
+    run.add_argument("--grasp", choices=GRASPS, default="claw",
+                     help="claw (default), or suction: the passive suction cup for a flat phone "
+                          "(hand mode only; needs the suction_* poses, taught with "
+                          "python -m arm.teach --grasp suction)")
+    run.add_argument("--suction-dwell", type=float, metavar="S",
+                     help=f"suction: seconds pressed on the object so the cup can seal "
+                          f"(default {SUCTION_DWELL_S:g})")
+    run.add_argument("--suction-hold", type=float, metavar="S",
+                     help=f"suction: seconds held at the present pose for the pull, then back to ready "
+                          f"(default {SUCTION_HOLD_S:g})")
     run.add_argument("--policy", help="ACT checkpoint folder (pretrained_model)")
     run.add_argument("--pan", type=float, default=0.0, help="shoulder_pan offset, deg")
     run.add_argument("--roll", type=float, default=0.0, help="wrist_roll offset, deg")
@@ -712,6 +810,16 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _grasp_label(argv: list[str]) -> str:
+    """The RESULT `grasp` for a command line that failed to parse: what it asked for."""
+    for i, arg in enumerate(argv):
+        if arg == "--grasp" and argv[i + 1:i + 2] == ["suction"] or arg == "--grasp=suction":
+            return "suction"
+    if any(a == "--policy" or a.startswith("--policy=") for a in argv):
+        return "policy"
+    return "scripted"
+
+
 def _error_result(detail: str, grasp: str) -> dict:
     return {"result": "error", "grasp": grasp, "attempts": 0, "seconds": 0.0, "detail": detail}
 
@@ -726,14 +834,27 @@ def main(argv=None) -> int:
     parser = _build_parser()
     try:
         args = parser.parse_args(argv)
+        suction = args.grasp == "suction"
         for flag, value in (("--handoff-timeout", args.handoff_timeout), ("--handoff-grip", args.handoff_grip)):
             if args.to == "tray" and value is not None:
                 parser.error(f"{flag} only applies to --to hand")
+            if suction and value is not None:
+                parser.error(f"{flag} only applies to --grasp claw (suction holds {SUCTION_HOLD_S:g} s by "
+                             f"default; see --suction-hold)")
+        if suction and args.to == "tray":
+            parser.error("--grasp suction only applies to --to hand")
+        if suction and args.policy:
+            parser.error("--policy drives the claw; it can't be combined with --grasp suction")
+        for flag, value in (("--suction-dwell", args.suction_dwell), ("--suction-hold", args.suction_hold)):
+            if not suction and value is not None:
+                parser.error(f"{flag} only applies to --grasp suction")
+            if value is not None and not (_is_number(value) and value > 0):
+                parser.error(f"{flag} must be a positive number of seconds, got {value!r}")
     except _ArgError as e:
-        policy_given = any(a == "--policy" or a.startswith("--policy=") for a in argv)
-        return _finish(_error_result(str(e), "policy" if policy_given else "scripted"))
+        return _finish(_error_result(str(e), _grasp_label(argv)))
 
-    grasp = "policy" if args.policy else "scripted"
+    suction = args.grasp == "suction"
+    grasp = "suction" if suction else "policy" if args.policy else "scripted"
     stop_event = threading.Event()
     log = lambda msg: print(msg, flush=True)
     old_handlers = {}
@@ -753,18 +874,19 @@ def main(argv=None) -> int:
             if joint in cfg["frozen_joints"] and value != 0:     # dry runs too, so they match the arm
                 raise ValueError(f"{flag} must be 0: {joint} is frozen (robot.yaml arm.frozen_joints)")
         timeout = grip = None
-        if args.to == "hand":
+        if args.to == "hand" and not suction:
             timeout = args.handoff_timeout
             if timeout is None:
                 timeout = load_handoff_timeout(args.config)
             elif not (_is_number(timeout) and timeout > 0):
                 raise ValueError(f"--handoff-timeout must be a positive number of seconds, got {timeout!r}")
             grip = args.handoff_grip if args.handoff_grip is not None else load_handoff_grip(args.config)
+        pose_mode = "suction" if suction else args.to
         if args.dry_run:
             from .sim import DEFAULT_POSES, SimArm
-            poses = poses_mod.load(args.poses, args.to) if args.poses.exists() else DEFAULT_POSES
+            poses = poses_mod.load(args.poses, pose_mode) if args.poses.exists() else DEFAULT_POSES
         else:
-            poses = poses_mod.load(args.poses, args.to)     # a pose this mode needs is missing: stop here
+            poses = poses_mod.load(args.poses, pose_mode)   # a pose this mode needs is missing: stop here
         policy = None
         if args.policy:     # before the arm opens; a dry run uses grey frames instead of webcams
             policy = load_policy(args.policy, config_path=args.config, capture_size=args.camera_size,
@@ -779,7 +901,15 @@ def main(argv=None) -> int:
             arm = RealArm(port=cfg["follower_port"], robot_id=cfg["follower_id"],
                           max_relative_target=cfg["max_relative_target_deg"],
                           frozen=cfg["frozen_joints"])
-        if args.to == "hand":
+        if suction:
+            result = pick_to_hand(arm, poses, pan_deg=args.pan, roll_deg=args.roll, speed_deg_s=speed,
+                                  stop_event=stop_event, on_state=lambda state: log(f"state {state}"),
+                                  log=log, grasp="suction",
+                                  suction_dwell_s=(args.suction_dwell if args.suction_dwell is not None
+                                                   else SUCTION_DWELL_S),
+                                  suction_hold_s=(args.suction_hold if args.suction_hold is not None
+                                                  else SUCTION_HOLD_S))
+        elif args.to == "hand":
             result = pick_to_hand(arm, poses, pan_deg=args.pan, roll_deg=args.roll, policy=policy,
                                   speed_deg_s=speed, handoff_timeout_s=timeout, stop_event=stop_event,
                                   on_state=lambda state: log(f"state {state}"), log=log, handoff_grip=grip)
