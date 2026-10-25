@@ -326,7 +326,7 @@ def test_cli_real_mode_reads_arm_settings_from_config(tmp_path, capsys, fake_rea
                        config=write_config(tmp_path, max_relative_target_deg=7))
     assert (rc, r["result"]) == (0, "taken")
     assert NoHardware.opened == [{"port": "/dev/tty.usbmodemTEST1", "robot_id": "so101_follower_arm",
-                                  "max_relative_target": 7}]
+                                  "max_relative_target": 7, "frozen": []}]
 
 
 # --- robot.yaml validation (review: unhelpful or unsafe config handling) ----------
@@ -1218,3 +1218,54 @@ def test_cli_bad_handoff_grip_flag_is_an_argument_error(tmp_path, capsys, monkey
     assert (rc, r["result"]) == (1, "error")
     assert "--handoff-grip" in r["detail"] and words in r["detail"]
     assert seen == [] and NoHardware.opened == []
+
+
+
+# --- frozen wrist roll (servo 5 never called) ---------------------------------------
+
+class FrozenRollArm(SimArm):
+    """Like RealArm with arm.frozen_joints [wrist_roll]: the wrist never moves, reads 0."""
+    frozen = ("wrist_roll",)
+
+    def read(self):
+        return {**super().read(), "wrist_roll": 0.0}
+
+    def command(self, targets):
+        super().command({j: v for j, v in targets.items() if j != "wrist_roll"})
+
+
+def test_the_hand_off_works_with_the_wrist_roll_frozen():
+    r = pick.pick_to_hand(FrozenRollArm(), DEFAULT_POSES)
+    assert r["result"] == "taken", r["detail"]
+
+
+@pytest.mark.parametrize("entry", [pick.pick_to_hand, pick.pick_to_tray])
+def test_a_roll_offset_is_refused_when_the_wrist_roll_is_frozen(entry):
+    with pytest.raises(ValueError, match="wrist_roll is frozen"):
+        entry(FrozenRollArm(), DEFAULT_POSES, roll_deg=5)
+
+
+@pytest.mark.parametrize("value, ok", [(None, True), ([], True), (["wrist_roll"], True),
+                                       (["gripper"], False), (["wrist_roll", "wrist_roll"], False),
+                                       ("wrist_roll", False), (["elbow"], False)])
+def test_frozen_joints_config(tmp_path, value, ok):
+    path = write_config(tmp_path, frozen_joints=value)
+    if ok:
+        assert pick.load_arm_config(path)["frozen_joints"] == (value or [])
+    else:
+        with pytest.raises(pick.ConfigError, match="frozen_joints"):
+            pick.load_arm_config(path)
+
+
+def test_frozen_joints_default_to_none(tmp_path):
+    assert pick.load_arm_config(write_config(tmp_path))["frozen_joints"] == []
+
+
+
+@pytest.mark.parametrize("mode", ["dry", "real"])
+def test_cli_refuses_a_roll_offset_when_the_wrist_roll_is_frozen(tmp_path, capsys, fake_real_arm, mode):
+    extra = ["--dry-run"] if mode == "dry" else []
+    rc, r, _ = run_cli(tmp_path, capsys, "--roll", "5", "--poses", str(fake_real_arm), *extra,
+                       config=write_config(tmp_path, frozen_joints=["wrist_roll"]))
+    assert (rc, r["result"]) == (1, "error") and "frozen" in r["detail"]
+    assert NoHardware.opened == []                       # refused before any arm opened

@@ -177,6 +177,84 @@ def test_typed_stop_wins_over_a_bad_hand_and_a_broken_parser(brain):
     assert brain.calls == [("stop",)] * 4
 
 
+# --- clarifying questions ----------------------------------------------------
+
+def offline_clarify(text, dialog=(), hand=None):
+    return request_mod.clarify_request(text, dialog, hand, ITEMS, use_api=False)
+
+
+@pytest.fixture
+def cclient(brain):
+    return TestClient(create_app(brain, parse=offline_parse, clarify=offline_clarify))
+
+
+def test_clarify_asks_without_calling_the_brain(cclient, brain):
+    r = cclient.post("/request", json={"text": "my phone fell", "hand": "", "clarify": True})
+    assert r.status_code == 200
+    parsed = r.json()["parsed"]
+    assert parsed["action"] == "ask" and parsed["question"] == request_mod.HAND_QUESTION
+    assert set(parsed) == {"action", "item", "hand", "question", "options"}
+    assert brain.calls == []
+
+
+def test_clarify_fetches_after_an_answer_with_the_resolved_hand(cclient, brain):
+    r = cclient.post("/request", json={"text": "my phone fell", "hand": "", "clarify": True,
+                                       "dialog": [{"question": request_mod.HAND_QUESTION, "answer": "Standing"}]})
+    assert r.json()["parsed"]["action"] == "fetch"
+    assert brain.calls == [("request", "phone", "standing")]
+    cclient.post("/request", json={"text": "my pen fell", "hand": "seated", "clarify": True})
+    assert brain.calls[-1] == ("request", "pen", "seated")
+
+
+def test_more_than_four_questions_is_rejected(cclient, brain):
+    dialog = [{"question": "q", "answer": "a"}] * 5
+    assert cclient.post("/request", json={"text": "my pen", "hand": "", "clarify": True, "dialog": dialog}).status_code == 422
+    assert brain.calls == []
+
+
+def test_four_questions_are_allowed_and_never_a_fifth(cclient, brain):
+    dialog = [{"question": "q", "answer": "hm"}] * 4
+    r = cclient.post("/request", json={"text": "my thing", "hand": "", "clarify": True, "dialog": dialog})
+    assert r.json()["parsed"]["action"] == "none"
+    assert brain.calls == []
+
+
+def test_stop_word_in_an_answer_stops_first(brain):
+    def broken(*a):
+        raise RuntimeError("parser down")
+
+    c = TestClient(create_app(brain, parse=broken, clarify=broken))
+    dialog = [{"question": "q", "answer": "a"}] * 5 + [{"question": "q", "answer": "stop!"}]
+    r = c.post("/request", json={"text": "my pen", "hand": "flying", "clarify": True, "dialog": dialog})
+    assert r.status_code == 200 and r.json()["parsed"]["action"] == "stop"
+    assert brain.calls == [("stop",)]
+
+
+def test_empty_hand_needs_clarify(cclient, brain):
+    for hand in ("", None):
+        assert cclient.post("/request", json={"text": "my pen fell", "hand": hand, "clarify": True}).status_code == 200
+        assert cclient.post("/request", json={"text": "my pen fell", "hand": hand}).status_code == 422
+    assert [c[0] for c in brain.calls] == []        # the clarify ones only asked (hand unknown)
+
+
+def test_clarify_stop_during_parse_drops_the_request(brain):
+    started, release = threading.Event(), threading.Event()
+
+    def slow_clarify(text, dialog, hand):
+        started.set()
+        release.wait(5)
+        return request_mod.clarify_request(text, dialog, hand, ITEMS, use_api=False)
+
+    with TestClient(create_app(brain, clarify=slow_clarify)) as c:
+        t, result = in_thread(lambda: c.post("/request", json={"text": "my pen", "hand": "seated", "clarify": True}))
+        assert started.wait(5)
+        c.post("/stop")
+        release.set()
+        t.join(5)
+    assert result["value"].json()["dropped"] == "stopped"
+    assert all(call == ("stop",) for call in brain.calls)       # no request() (the last stop is shutdown's)
+
+
 def test_status_fields(client):
     s = client.get("/status").json()
     for key in STATUS_FIELDS:
@@ -447,6 +525,12 @@ def test_page_uses_the_parsers_stop_words():
     "lift_and_tray_rows_show_when_there_are_numbers",
     "wait_for_take_is_prominent",
     "handoff_steps_follow_the_state",
+    "question_is_shown_with_option_buttons",
+    "tapping_an_option_reposts_with_the_dialog",
+    "typing_an_answer_posts_it_as_the_answer_to_the_question",
+    "stop_clears_the_conversation",
+    "cancel_clears_the_conversation_without_stopping",
+    "clarify_setting_off_sends_no_dialog_and_hand_seated",
 ])
 def test_page_script(tmp_path, scenario):
     script = tmp_path / "page.js"

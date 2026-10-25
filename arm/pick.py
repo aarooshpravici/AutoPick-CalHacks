@@ -471,6 +471,10 @@ def _pick(mode, sequence, arm, poses, pan_deg, roll_deg, policy, speed_deg_s, st
     for name, value in (("pan_deg", pan_deg), ("roll_deg", roll_deg)):
         if not _is_number(value):
             raise ValueError(f"{name} must be a finite number, got {value!r}")
+    frozen = tuple(getattr(arm, "frozen", ()))
+    for joint, name, value in (("shoulder_pan", "pan_deg", pan_deg), ("wrist_roll", "roll_deg", roll_deg)):
+        if joint in frozen and value != 0:
+            raise ValueError(f"{name} must be 0: {joint} is frozen (robot.yaml arm.frozen_joints) and never moves")
     poses_mod.validate(poses, mode)
     opened = isinstance(policy, (str, Path))
     if camera_size is not None and not opened:
@@ -570,6 +574,14 @@ def load_arm_config(path: str | Path = DEFAULT_CONFIG_PATH,
     if arm["move_speed_deg_s"] > MAX_SPEED_DEG_S:
         raise ConfigError(f"{path}: arm.move_speed_deg_s is {arm['move_speed_deg_s']:g}, above the "
                           f"{MAX_SPEED_DEG_S:g} deg/s arm limit (plan section 17)")
+    frozen = arm.get("frozen_joints", [])
+    if frozen is None:
+        frozen = []
+    if (not isinstance(frozen, list) or any(j not in ARM_JOINTS for j in frozen)
+            or len(set(frozen)) != len(frozen)):
+        raise ConfigError(f"{path}: arm.frozen_joints must be a list of distinct arm joints from "
+                          f"{list(ARM_JOINTS)} (not the gripper), got {frozen!r}")
+    arm["frozen_joints"] = list(frozen)
     return arm
 
 
@@ -737,6 +749,9 @@ def main(argv=None) -> int:
         for flag, value in (("--pan", args.pan), ("--roll", args.roll)):   # before any hardware opens
             if not _is_number(value):
                 raise ValueError(f"{flag} must be a finite number, got {value!r}")
+        for flag, value, joint in (("--pan", args.pan, "shoulder_pan"), ("--roll", args.roll, "wrist_roll")):
+            if joint in cfg["frozen_joints"] and value != 0:     # dry runs too, so they match the arm
+                raise ValueError(f"{flag} must be 0: {joint} is frozen (robot.yaml arm.frozen_joints)")
         timeout = grip = None
         if args.to == "hand":
             timeout = args.handoff_timeout
@@ -762,7 +777,8 @@ def main(argv=None) -> int:
         else:
             from .real import RealArm
             arm = RealArm(port=cfg["follower_port"], robot_id=cfg["follower_id"],
-                          max_relative_target=cfg["max_relative_target_deg"])
+                          max_relative_target=cfg["max_relative_target_deg"],
+                          frozen=cfg["frozen_joints"])
         if args.to == "hand":
             result = pick_to_hand(arm, poses, pan_deg=args.pan, roll_deg=args.roll, policy=policy,
                                   speed_deg_s=speed, handoff_timeout_s=timeout, stop_event=stop_event,
