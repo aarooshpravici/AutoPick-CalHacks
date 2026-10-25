@@ -22,9 +22,20 @@ realsense:
 base:
   serial_port: /dev/tty.usbserial-XXXX
   baud: 115200
-  wheel_diameter_mm: 72
-  track_width_mm: 260                 # Measure on the built base.
-  max_speed_mm_s: 200                 # First real runs must stay at or below 100.
+  controller: uno_r4_wifi
+  wheel_diameter_mm: 71               # Issue #47; verify loaded rolling diameter.
+  track_width_mm: 430                 # Approximate wheel-centre spacing; tune for skid slip.
+  wheelbase_mm: 305
+  half_steps_per_rev: 4096            # Nominal 28BYJ-48 gearbox; measure before odometry use.
+  left_coil_pins: [8, 9, 10, 11]       # ULN2003 IN1..IN4; two drivers share each side's signals.
+  right_coil_pins: [2, 3, 4, 5]
+  invert_left: false                 # Verify direction with wheels raised.
+  invert_right: false
+  wiring_confirmed: false            # Set only after HW1 wiring/power check.
+  estop_sense_pin: -1                # No sense wire specified; physical E-stop still required.
+  max_speed_mm_s: 30                 # PROVISIONAL; replace after loaded speed/turn measurement.
+  acceleration_mm_s2: 30
+  stop_acceleration_mm_s2: 300
 perception:
   detector_weights: data/models/phone_v2.pt  # Local file; never committed.
   detector_conf: 0.5

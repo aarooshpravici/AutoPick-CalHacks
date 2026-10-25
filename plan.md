@@ -233,13 +233,27 @@ This is a stretch goal. It is built only after G4, and only if everything else w
 
 ## 7. Electronics and power
 
+**Sat evening hardware update (issue #47, supersedes earlier wheel electronics):**
+Uno R4 WiFi controls four 5 V 28BYJ-48 geared steppers through four ULN2003-style
+boards. Each left driver shares IN1–IN4 signals from D8/D9/D10/D11; each right
+driver shares D2/D3/D4/D5. Motors take power from the 5 V buck rail, not GPIO or
+the Uno regulator. Common ground is required. The physical E-stop must remove
+motor power upstream of the buck as well as the arm's 12 V branch. No E-stop
+sense pin has been supplied; `STAT estop=0` is not proof the switch is released.
+Confirm the driver input order and wheel direction before enabling firmware.
+Wiring is unfinished and existing driver boards may be damaged: replacement
+boards and HW1's power check are prerequisites to energising/testing this setup.
+The older NEMA/TMC current estimates below do not describe these wheel motors;
+HW1 must verify the actual 5 V load and buck/driver ratings.
+
+
 ```mermaid
 flowchart LR
     SUP["12 V 10 A supply<br/>tethered for the demo"] --> ES["E-stop switch"] --> MF["Main fuse 15 A"] --> DB["Distribution block"]
     DB --> F1["Fuse 5 A"] --> ARMB["SO-101 follower<br/>bus servo board"]
     DB --> F2["Fuse 5 A"] --> CAP["470-1000 uF capacitor"] --> TMC["4 wheel motor drivers<br/>type: confirm with Darren<br/>a lift driver is stretch"]
     DB --> F3["Fuse 2 A"] --> PUMP["Pump + valve<br/>only if suction"]
-    DB --> F4["Fuse 1 A"] --> BUCK["Buck converter 12 V to 5 V"] --> ESPP["ESP32, LED<br/>HX711 (stretch)"]
+    DB --> F4["Fuse 1 A"] --> BUCK["Buck converter 12 V to 5 V"] --> ESPP["Arduino Uno R4 WiFi, LED<br/>HX711 (stretch)"]
     LEAD["SO-101 leader: own 5 V supply,<br/>stays off the robot"]
 ```
 
@@ -251,14 +265,14 @@ flowchart LR
 | 4 drive motors | About 0.5–1 A each if NEMA 17 steppers (estimate; confirm with Darren) |
 | Lift stepper (moving, stretch) | About 1 A |
 | Pump and valve (only if suction) | About 0.5 A |
-| ESP32 and sensors, via the buck converter | Small |
+| Arduino Uno R4 WiFi and sensors, via the buck converter | Small |
 | **Total** | **About 5–6 A peak** without the lift (about 6–7 A with it). Use a 10 A supply. |
 
 **Wiring rules**
 
-- **Common ground:** every board's ground returns to one point. The ESP32's step signals only work if the drivers share its ground.
+- **Common ground:** every board's ground returns to one point. The Arduino Uno R4 WiFi's step signals only work if the drivers share its ground.
 - **E-stop:** it cuts the 12 V, which stops the arm and wheels, and the lift if the stretch lift is built.
-- **Brownouts:** put the 470–1000 µF capacitor across the stepper drivers' input, and keep power wires short and thick. If the arm's servos still reset when the wheels start, give the arm its own supply.
+- **Brownouts:** put the 470–1000 µF capacitor across the ULN2003 driver boards' input, and keep power wires short and thick. If the arm's servos still reset when the wheels start, give the arm its own supply.
 - **Fuses:** one per branch, so one short doesn't take everything down.
 - **USB:** the RealSense gets its own USB 3 port on the Mac. Everything else goes through the powered hub.
 - **Battery:** stretch goal. If used, a 12 V pack of about 5 Ah lasts roughly 1.5–2.5 h (estimate). Check its fully charged voltage (a 3S LiPo reaches 12.6 V) against the servo and pump ratings. Let the TMC2209s cut current when standing still.
@@ -282,7 +296,7 @@ floor-picker/
 ├── training/               ACT: record, convert, train remotely, pull checkpoints   [SW1, env: lerobot]
 ├── perception/             RealSense, YOLO, floor mapping, hand height, publishers  [SW2 + SW1, env: perception]
 ├── base/
-│   ├── firmware/           ESP32 (PlatformIO, Arduino framework)                    [SW2]
+│   ├── firmware/           Uno R4 WiFi (PlatformIO, Arduino framework)                    [SW2]
 │   └── driver.py           Python side of the serial protocol                       [SW2, env: lerobot]
 ├── brain/                  mission state machine                                    [SW2, env: lerobot]
 ├── ui/                     FastAPI status page, STOP, request parser                [SW1, env: lerobot]
@@ -312,7 +326,7 @@ flowchart LR
     UI --> REQ --> BRAIN
     BRAIN <--> ARMM
     BRAIN <--> BASED
-    BASED <-->|"USB serial, 115200"| ESP32["ESP32 firmware"]
+    BASED <-->|"USB serial, 115200"| Uno R4 WiFi["Uno R4 WiFi firmware"]
     ARMM <-->|"USB, servo bus"| SO101["SO-101 follower"]
 ```
 
@@ -648,7 +662,9 @@ flowchart TD
 
 **Firmware (`base/firmware/`)**
 
-- **Platform:** ESP32 with drivers for four wheel motors, as left and right pairs: the two motors on a side get the same command, so `DRIVE <left> <right>` is unchanged. If they are steppers, use four TMC2209s, with the two drivers on each side sharing the step and direction pins. If they are DC motors, use H-bridge drivers instead, and STAT reports encoder counts (or 0 without encoders). Motor type: confirm with Darren (D10). The stretch lift adds its own driver, an HX711 and the bottom limit switch.
+- **Platform (issue #47):** Arduino Uno R4 WiFi (RA4M1) with four 28BYJ-48 5 V steppers, each on a ULN2003-style driver. Both motors on each side share the four coil signals: left D8–D11, right D2–D5. Nonblocking eight-phase half stepping; STOP and watchdog retain the last coil pattern to hold position while powered. Nominal 4096 half steps/output revolution is provisional and needs measurement.
+- **Geometry:** wheel diameter 71 mm, track 430 mm, wheelbase 305 mm (approximate HW1 values). Skid slip means commanded step counts are not measured travel.
+- **Limits:** start with a provisional 30 mm/s maximum, 30 mm/s² acceleration and 300 mm/s² STOP deceleration. Measure loaded speed and turning before raising limits; 28BYJ-48 torque may be inadequate. Configuration and pin map live in `robot.yaml`; `base/firmware/generate_config.py` generates the matching header. `wiring_confirmed` defaults false.
 - **Protocol:** implements 9.5 exactly.
 - **Watchdog:** the 300 ms wheel watchdog is mandatory.
 - **Acceleration:** limit wheel acceleration, and lift acceleration if the lift is built, so the robot doesn't rock.
