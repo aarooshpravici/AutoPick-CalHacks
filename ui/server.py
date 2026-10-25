@@ -385,6 +385,10 @@ dt { color:var(--muted); } dd { margin:0; font-variant-numeric:tabular-nums; ove
 footer { display:flex; justify-content:space-between; gap:16px; padding-top:24px; color:#7a8377; font-size:10px; letter-spacing:.3px; }
 #connection[data-online="false"] { color:var(--stop); } #connection[data-online="false"]::before { background:var(--stop); }
 .stale #state::after { content:" · Offline"; font:14px -apple-system,sans-serif; color:var(--stop); }
+button.phone-choice { grid-column:1/-1; grid-row:1; display:flex; align-items:center; gap:18px; min-height:110px; padding:24px; background:#edf2e6; color:var(--go); border:1px solid #a3b49b; font-size:21px; text-align:left; border-radius:14px; }
+button.phone-choice:hover { background:#dce7d1; border-color:var(--go); }
+.choice-arrow { margin-left:auto; font-size:23px; }
+#ask .select-wrap { grid-column:1/-1; margin-top:10px; }
 @media (min-width:761px) { .side { position:sticky; top:20px; } }
 @media (max-width:900px) { main { padding:0 28px 24px; } .brand-note { display:none; } h2 { font-size:46px; } .workspace { grid-template-columns:minmax(0,1.2fr) minmax(280px,1fr); } .card { padding:22px; } .select-wrap { gap:6px; } button.go { padding:12px 15px; } }
 @media (max-width:760px) {
@@ -405,21 +409,20 @@ footer { display:flex; justify-content:space-between; gap:16px; padding-top:24px
     <div class="top-status"><span class="mode">__MODE__</span><span id="connection" role="status">Connecting</span></div>
   </header>
   <section class="intro">
-    <div><div class="eyebrow">Your everyday helping hand</div><h2>Leave the reaching<br><em>to us.</em></h2><p>Tell us what you dropped. We'll take it from here.</p></div>
+    <div><div class="eyebrow">Your everyday helping hand</div><h2>Leave the reaching<br><em>to us.</em></h2><p>Choose what you dropped. We'll take it from here.</p></div>
     <p class="intro-note">From the floor to your hand.<br>A little more independence.</p>
   </section>
   <div id="stopfail" role="alert" hidden><b>STOP FAILED: hit the E-stop on the robot.</b><span id="stopwhy"></span> Trying again every second.</div>
   <div class="workspace">
     <section class="card request-card">
       <div class="card-label"><h3>Make a request</h3><span class="card-number">01 / REQUEST</span></div>
-      <h3 class="request-title">What can we pick up?</h3><p class="help">Use your own words. We’ll help with the details.</p>
+      <h3 class="request-title">What did you drop?</h3><p class="help">Choose an item and we’ll bring it to you.</p>
       <form id="ask">
-        <label class="input-label" for="text">Your request</label>
-        <input id="text" autocomplete="off" placeholder="I dropped my phone">
-        <div class="select-wrap"><label for="hand">Hand-off height</label><select id="hand" aria-label="Hand height"><option value="">Ask me</option><option value="seated">Seated</option><option value="standing">Standing</option></select></div>
-        <button class="go" id="go" type="submit" aria-disabled="false">Send request <span aria-hidden="true">↗</span></button>
+        <input id="text" type="hidden" value="phone">
+        <div class="select-wrap"><label for="hand">Hand-off height</label><select id="hand" aria-label="Hand height"><option value="seated">Seated</option><option value="standing">Standing</option></select></div>
+        <button class="go phone-choice" id="go" type="button" aria-disabled="false"><svg width="28" height="36" viewBox="0 0 28 36" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="5" y="2" width="18" height="32" rx="4"/><path d="M10 6h8M11 29h6"/></svg><span>Phone</span><span class="choice-arrow" aria-hidden="true">↗</span></button>
       </form>
-      <label id="setting"><input type="checkbox" id="clarify" checked> Ask me questions first</label>
+      <label id="setting" hidden><input type="checkbox" id="clarify"> Ask me questions first</label>
       <div id="question" role="status" aria-live="polite" hidden></div><div id="opts"></div>
       <button id="cancel" type="button" hidden>Cancel</button><div id="reply" role="status" aria-live="polite"></div>
       <div class="request-foot"><svg width="16" height="18" viewBox="0 0 16 18" fill="none" aria-hidden="true"><path d="M8 1 14 3v5c0 4-6 8-6 8S2 12 2 8V3l6-2Z" stroke="currentColor"/><path d="m5 8 2 2 4-4" stroke="currentColor"/></svg> You're in control. Stop a request at any time.</div>
@@ -500,7 +503,7 @@ $("cancel").addEventListener("click", () => { endConversation(); $("reply").text
 // The "Ask me questions first" setting; the page works without localStorage.
 let handTouched = false;
 try { const v = localStorage.getItem("clarify"); if (v !== null) $("clarify").checked = v === "1"; } catch (e) {}
-const syncHand = () => { if (!handTouched) $("hand").value = $("clarify").checked ? "" : "seated"; };
+const syncHand = () => { if (!handTouched) $("hand").value = "seated"; };
 syncHand();
 $("hand").addEventListener("change", () => { handTouched = true; });
 $("clarify").addEventListener("change", () => {
@@ -536,7 +539,9 @@ $("ask").addEventListener("submit", e => {
 });
 
 // Send the box text (or a tapped option): a new request, or the answer to the pending question.
-async function send(raw) {
+$("go").addEventListener("click", () => { endConversation(); return send("phone", true); });
+
+async function send(raw, direct = false) {
   const text = raw.trim(); if (!text) return;
   if (STOP_WORDS.test(text)) {           // typed stop goes straight to /stop, even mid-request
     $("text").value = ""; $("reply").textContent = "Stopping";
@@ -545,7 +550,7 @@ async function send(raw) {
   }
   if (stopFailing) { $("reply").textContent = "STOP has not gone through yet."; return; }
   if (asking) return;
-  const clarify = $("clarify").checked;
+  const clarify = !direct && $("clarify").checked;
   const answering = clarify && convo.pending !== null;      // else this starts a new request
   const sent = answering ? {text: convo.text, dialog: [...convo.dialog, {question: convo.pending, answer: text}]}
                          : {text, dialog: []};
