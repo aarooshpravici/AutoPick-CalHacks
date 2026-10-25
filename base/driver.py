@@ -50,6 +50,7 @@ class BaseDriver:
         self._write_lock = threading.Lock()
         self._replies = deque(maxlen=128)
         self._status = None
+        self.limit_reached = False
         self._fault = None
         self._lift_blocked = False
         self._stop_generation = 0
@@ -97,6 +98,10 @@ class BaseDriver:
                                                   finite(fields[3]), finite(fields[4]),
                                                   fields[5] == "1", time.monotonic())
                         else:
+                            if line == "LIMIT REACHED":
+                                self.limit_reached = True
+                            if line == "OK LIMIT":
+                                self.limit_reached = False
                             if line == "OK STOP":
                                 self._stop_acked += 1
                             if line.startswith("ERR ") and line != "ERR no lift":
@@ -172,6 +177,12 @@ class BaseDriver:
                 if remaining <= 0:
                     raise TimeoutError("no STAT received")
                 self._condition.wait(remaining)
+
+    def set_travel_limit(self, mm):
+        mm = finite(mm)
+        if not 0 < mm <= 6096:
+            raise ValueError("travel limit must be greater than 0 and at most 6096 mm")
+        self._request(f"LIMIT {mm:.6f}", lambda reply: reply == "OK LIMIT")
 
     def ping(self):
         self._request("PING", lambda reply: reply == "PONG")
@@ -279,6 +290,9 @@ class FakeSerial:
         self.steps_per_mm = steps_per_rev / (math.pi * wheel_diameter_mm)
         self.left = self.right = self.lift_mm = self.weight = 0.0
         self.left_steps = self.right_steps = 0.0
+        self.travel_budget = None
+        self.travel_used = 0.0
+        self.limit_reached = False
         self.estop = False
         self.homed = False
         self.closed = False
@@ -292,8 +306,17 @@ class FakeSerial:
         now = self.clock()
         elapsed = max(0, now - self.last_update)
         moving_dt = max(0, min(now, self.last_drive + WATCHDOG_S) - self.last_update)
+        speed = (abs(self.left) + abs(self.right)) / 2
+        if self.travel_budget is not None and speed:
+            moving_dt = min(moving_dt, max(0, self.travel_budget - self.travel_used) / speed)
+            self.travel_used += speed * moving_dt
         self.left_steps += self.left * moving_dt * self.steps_per_mm
         self.right_steps += self.right * moving_dt * self.steps_per_mm
+        if self.travel_budget is not None and self.travel_used >= self.travel_budget:
+            if not self.limit_reached:
+                self._lines.append(b"LIMIT REACHED\n")
+            self.limit_reached = True
+            self.left = self.right = 0
         self.last_update = now
         if now - self.last_drive >= WATCHDOG_S or self.estop:
             self.left = self.right = 0.0
@@ -333,6 +356,12 @@ class FakeSerial:
             try:
                 if parts == ["PING"]:
                     reply = "PONG"
+                elif len(parts) == 2 and parts[0] == "LIMIT":
+                    mm = finite(parts[1])
+                    if not 0 < mm <= 6096 or self.left or self.right:
+                        raise ValueError("invalid travel limit")
+                    self.travel_budget, self.travel_used, self.limit_reached = mm, 0, False
+                    reply = "OK LIMIT"
                 elif parts == ["STOP"]:
                     self.left = self.right = 0
                     self.lift_target = None  # Keep enable and current height: hold.
@@ -357,7 +386,10 @@ class FakeSerial:
                     left, right = finite(parts[1]), finite(parts[2])
                     if max(abs(left), abs(right)) > self.max_speed or self.lift_mm != 0 or self.lift_target is not None:
                         raise ValueError("unsafe drive")
-                    self.left, self.right, self.last_drive = left, right, self.clock()
+                    if self.limit_reached:
+                        reply = "LIMIT REACHED"
+                    else:
+                        self.left, self.right, self.last_drive = left, right, self.clock()
                 else:
                     raise ValueError("unknown or disabled command")
             except ValueError as error:

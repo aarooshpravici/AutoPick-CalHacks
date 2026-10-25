@@ -11,6 +11,20 @@ class Controller {
 public:
     float left = 0, right = 0;
     bool estop = false;
+    bool limit_reached = false;
+    // Consume actual issued half-steps, including turning/reversals. Reserve one
+    // step before the next wheel update so quantization never exceeds the budget.
+    void wheel_steps(int32_t l, int32_t r, float steps_per_mm) {
+        if (limited_) {
+            travel_mm_ += (std::fabs(double(l) - previous_left_) +
+                           std::fabs(double(r) - previous_right_)) / (2 * steps_per_mm);
+            if (travel_mm_ + 1.0 / steps_per_mm >= budget_mm_) {
+                limit_reached = true;
+                halt();
+            }
+        }
+        previous_left_ = l; previous_right_ = r;
+    }
     Controller(bool ready, float limit, float accel, float stop_accel)
         : ready_(ready), limit_(limit), accel_(accel), stop_accel_(stop_accel) {}
 
@@ -18,7 +32,7 @@ public:
         const uint32_t dt = now - last_tick_;
         last_tick_ = now;
         estop = emergency;
-        if (estop || (driving_ && uint32_t(now - last_drive_) >= 300)) {
+        if (limit_reached || estop || (driving_ && uint32_t(now - last_drive_) >= 300)) {
             halt();
             return;
         }
@@ -40,6 +54,14 @@ public:
             stopping_ = true;
             return "OK STOP";
         }
+        if (!strcmp(cmd, "LIMIT") && a && !b) {
+            float mm;
+            if (!number(a, mm) || mm <= 0 || mm > 6096 || left || right || target_left_ || target_right_) {
+                halt(); return "ERR invalid travel limit";
+            }
+            budget_mm_ = mm; travel_mm_ = 0; limited_ = true; limit_reached = false;
+            return "OK LIMIT";
+        }
         if (!strcmp(cmd, "PING") && !a) return "PONG";
         if (!strcmp(cmd, "LIFT_HOME") || !strcmp(cmd, "LIFT_TO")
                 || !strcmp(cmd, "TRAY") || !strcmp(cmd, "TARE")) return "ERR no lift";
@@ -49,10 +71,12 @@ public:
                 halt();
                 return "ERR invalid speed";
             }
+            if (limit_reached) { halt(); return "LIMIT REACHED"; }
             if (estop || !ready_) {
                 halt();
                 return estop ? "ERR estop" : "ERR unconfigured motors";
             }
+            if (!limited_) { halt(); return "ERR travel limit required"; }
             target_left_ = l;
             target_right_ = r;
             last_drive_ = now;
@@ -66,6 +90,9 @@ public:
 
     void halt() { left = right = target_left_ = target_right_ = 0; driving_ = false; }
 private:
+    bool limited_ = false;
+    double budget_mm_ = 0, travel_mm_ = 0;
+    int32_t previous_left_ = 0, previous_right_ = 0;
     bool ready_, driving_ = false, stopping_ = false;
     float limit_, accel_, stop_accel_, target_left_ = 0, target_right_ = 0;
     uint32_t last_drive_ = 0, last_tick_ = 0;

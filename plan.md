@@ -448,11 +448,13 @@ result = pick_to_hand(arm, poses, grasp="suction", suction_dwell_s=2.0, suction_
 
 Command line: `python -m arm.pick run [--to hand|tray] [--grasp claw|suction] [--policy DIR] [--pan DEG] [--roll DEG] [--speed DEG_S] [--dry-run]`. The default is `--to hand`. The last printed line is `RESULT {json}`. Exit codes: 0 taken or in_tray, 1 error or stopped, 2 missed, 3 dropped, 4 stuck, 5 timeout.
 
-### 9.5 Serial protocol (Mac ↔ ESP32, USB, 115200 baud, one command per line)
+### 9.5 Serial protocol (Mac ↔ Uno R4, USB, 115200 baud, one command per line)
 
 | Command from the Mac | Reply | Meaning |
 |---|---|---|
 | `PING` | `PONG` | Link check |
+| `LIMIT <mm>` | `OK LIMIT` | Set a new estimated travel budget while fully stopped; finite, greater than zero, at most 6096 mm (20 ft). Required after boot before DRIVE. |
+| `LIMIT REACHED` (R4 → Mac) | (event) | Latched budget exhausted; wheels hold, further DRIVE is ignored until a new LIMIT. Repeated with STAT while latched. |
 | `DRIVE <left_mm_s> <right_mm_s>` | (none) | Wheel speeds. **Watchdog: the wheels stop if no DRIVE arrives for 300 ms.** |
 | `STOP` | `OK STOP` | Stop wheels and any fitted lift with quick deceleration; abandon the active lift move and hold its current height (REQ-codex-2) |
 | `LIFT_HOME` | `LIFT_HOMED` | Lower until the bottom switch, zero the position (stretch: lift) |
@@ -463,6 +465,8 @@ Command line: `python -m arm.pick run [--to hand|tray] [--grasp claw|suction] [-
 - **Status:** the ESP32 also sends `STAT <left_steps> <right_steps> <lift_mm> <tray_g> <estop>` every 100 ms.
 - **Errors:** sent as `ERR <text>`.
 - **Without the lift:** firmware replies `ERR no lift` to `LIFT_HOME`, `LIFT_TO`, `TRAY` and `TARE`, and `STAT` reports `lift_mm` and `tray_g` as 0.
+- **Travel budget (SW2 draft):** the form asks for feet, object and hand-off height. The Mac converts feet × 304.8 to mm, acknowledges STOP, then acknowledges LIMIT before driving. The R4 sums the mean absolute left/right issued half-step distance, including turns and reversals; STOP/watchdog do not reset it. The controller stops one half-step early to bound quantization. This is commanded wheel travel, not measured floor displacement; skid/slip and calibration affect physical accuracy. At the limit the brain waits for acknowledged STOP and a new camera frame (up to 2 seconds), reports seen/not-found/unavailable and stays stopped. No automatic turn, return or pickup at that point. Legacy text requests without an estimate receive a 20 ft budget. Older firmware rejects LIMIT and the mission fails closed. Review and deploy firmware/driver/brain together.
+- **Pickup reach (REQ-claude-14):** `navigation.pickup_max_distance_m: 0.33` adds a radial limit to measured parking. The provisional reference is the floor below the front camera, matching `floor_m`; verify its offset from SW1’s physical arm reference on the final robot. Reject a configured parking target outside this range.
 - **STOP and hold:** a fitted lift keeps its stepper enabled at its current height. An abandoned `LIFT_TO` does not later send `LIFT_AT`; only a new `LIFT_HOME` or `LIFT_TO` moves it again. The Mac cancels the outstanding lift wait after `OK STOP`. `ERR no lift` is a capability response, not a broken serial link.
 - **Brain STOP:** the page button or the word "stop" sends serial `STOP` and holds the arm (torque stays on), within 0.5 s. A physical E-stop instead cuts 12 V, so a belt lift can slide down; keep hands clear and provide a mechanical bottom stop or friction with HW2.
 - **Steps per mm, drive:** with a 72 mm wheel, 200 steps per turn and 8 microsteps, one step is about 0.14 mm.
@@ -484,7 +488,8 @@ parse_request("stop!")               # -> {"action": "stop", "item": None}
 
 | Route | Does |
 |---|---|
-| `GET /` | The page: text box, big STOP button, current state, small camera thumbnails |
+| `GET /` | The page: feet estimate, object selection, hand-off height, Start request, tutorial, big STOP button and current state |
+| `POST /fetch` | Structured form: `{"item":"phone","hand":"standing","distance_ft":3.5}`; positive finite feet, at most 20; no language parser |
 | `POST /request` | `{"text": "..."}`: parsed, then sent to the brain |
 | `POST /stop` | Stop everything |
 | `GET /status` | Brain state (state names include Present and WaitForTake), last detection, lift height and tray weight (`lift_mm` and `tray_g`, null without the lift), last pick result |

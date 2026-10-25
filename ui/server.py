@@ -37,12 +37,12 @@ import threading
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
 from fastapi import FastAPI, HTTPException
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from . import request as request_mod
 
@@ -67,7 +67,7 @@ class Brain(Protocol):
       --sim` and `--real` call it. build() must not move anything.
     """
 
-    def request(self, item: str, hand: str) -> None:
+    def request(self, item: str, hand: str, *, max_distance_ft: float | None = None) -> None:
         """Start fetching `item` (one of robot.yaml `items`) for a person whose hand
         is at `hand` height: "seated" or "standing" (robot.yaml lift.seated_hand_mm
         or lift.standing_hand_mm).
@@ -130,6 +130,13 @@ class RequestBody(BaseModel):
     dialog: list[Turn] = []   # questions already asked for this request and the answers, oldest first
 
 
+class FetchBody(BaseModel):
+    """A selected UI item, never arbitrary serial instructions or model output."""
+    item: Literal["phone"]
+    distance_ft: float | None = Field(default=None, gt=0, le=20, allow_inf_nan=False, strict=True)
+    hand: Literal["seated", "standing"] = "standing"
+
+
 class _StopCount:
     """How many STOPs so far. A request parsed across a STOP is dropped."""
 
@@ -165,7 +172,9 @@ def create_app(brain: Brain, parse=request_mod.parse_request, clarify=request_mo
 
     @app.get("/", response_class=HTMLResponse)
     def page():
-        return PAGE
+        simulated = isinstance(brain, FakeBrain) or getattr(brain, "simulated", False)
+        return PAGE.replace("__MODE__", "Simulation" if simulated else "Robot control").replace(
+            "__MODE_NOTE__", "Simulation · no hardware moves" if simulated else "Robot control · stay within reach of the E-stop")
 
     # async: runs on the event loop, never queued behind the worker threads.
     @app.post("/stop")
@@ -173,6 +182,34 @@ def create_app(brain: Brain, parse=request_mod.parse_request, clarify=request_mo
         t0 = time.monotonic()
         stop_now()
         return {"stopped": True, "brain_ms": round((time.monotonic() - t0) * 1000, 1)}
+
+    async def dispatch_fetch(parsed, hand, seen, distance_ft=None):
+        def begin():
+            # Recheck after waiting for a thread: a queued request must not undo STOP.
+            if stops.value != seen:
+                return False
+            if distance_ft is None:
+                brain.request(parsed["item"], hand)
+            else:
+                brain.request(parsed["item"], hand, max_distance_ft=distance_ft)
+            return True
+        try:
+            accepted = await run_in_threadpool(begin)
+        except ValueError as error:
+            raise HTTPException(422, str(error)) from error
+        if not accepted or stops.value != seen:
+            if accepted:
+                brain.stop()
+            return {"parsed": parsed, "dropped": "stopped"}
+        return {"parsed": parsed}
+
+    @app.post("/fetch")
+    async def fetch_selected(body: FetchBody):
+        if "distance_ft" in body.model_fields_set and body.distance_ft is None:
+            raise HTTPException(422, "distance_ft must be a positive number")
+        # The structured form needs no natural-language model or external API.
+        parsed = {"action": "fetch", "item": body.item, "hand": body.hand}
+        return await dispatch_fetch(parsed, body.hand, stops.value, body.distance_ft)
 
     @app.post("/request")
     async def post_request(body: RequestBody):
@@ -197,12 +234,7 @@ def create_app(brain: Brain, parse=request_mod.parse_request, clarify=request_mo
         if parsed["action"] == "stop":
             stop_now()
         elif parsed["action"] == "fetch":
-            if stops.value != seen:                    # STOP arrived while parsing
-                return {"parsed": parsed, "dropped": "stopped"}
-            await run_in_threadpool(brain.request, parsed["item"], hand)
-            if stops.value != seen:                    # STOP raced with request(): make sure it wins
-                brain.stop()
-                return {"parsed": parsed, "dropped": "stopped"}
+            return await dispatch_fetch(parsed, hand, seen)
         return {"parsed": parsed}
 
     @app.get("/status")
@@ -243,7 +275,7 @@ class FakeBrain:
         self._last_pick = None
         self._message = "Ready"
 
-    def request(self, item: str, hand: str) -> None:
+    def request(self, item: str, hand: str, *, max_distance_ft: float | None = None) -> None:
         with self._lock:
             self._state, self._item, self._hand = "Search", item, hand
             self._started = time.monotonic()
@@ -296,107 +328,191 @@ PAGE = """<!doctype html>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Floor Picker</title>
 <style>
-  :root { --bg:#f6f5f2; --card:#fff; --ink:#1d1d1b; --muted:#6b6a66; --line:#e2e0da;
-          --stop:#c62828; --stop-dark:#8e1c1c; --go:#1f6f4a; }
-  @media (prefers-color-scheme: dark) {
-    :root { --bg:#151514; --card:#1f1f1d; --ink:#f1f0ec; --muted:#a3a29c; --line:#34332f; }
-  }
-  * { box-sizing:border-box; }
-  html { -webkit-text-size-adjust:100%; text-size-adjust:100%; }   /* no iOS text inflation in landscape */
-  button, select { touch-action:manipulation; }                   /* fast taps; a double tap on STOP doesn't zoom */
-  body { margin:0; background:var(--bg); color:var(--ink);
-         font:16px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; padding:16px; }
-  main { max-width:640px; margin:0 auto; display:grid; gap:14px; }
-  h1 { font-size:18px; margin:0; color:var(--muted); font-weight:600; letter-spacing:.02em; }
-  #stop { width:100%; min-height:120px; border:0; border-radius:16px; background:var(--stop);
-          color:#fff; font-size:44px; font-weight:800; letter-spacing:.08em; cursor:pointer;
-          box-shadow:0 6px 0 var(--stop-dark); }
-  #stop:active { transform:translateY(4px); box-shadow:0 2px 0 var(--stop-dark); }
-  #stopfail { background:var(--stop); color:#fff; border-radius:14px; padding:14px; font-size:20px; }
-  #stopfail b { display:block; font-size:26px; }
-  #stopfail[hidden] { display:none; }
-  .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:14px; }
-  #state { font-size:28px; font-weight:700; }
-  #message { color:var(--muted); margin-top:2px; }
-  #steps { display:flex; gap:6px; list-style:none; margin:12px 0 0; padding:0; font-size:13px; }
-  #steps li { flex:1; text-align:center; padding:4px 2px; border-radius:8px; color:var(--muted);
-              border:1px solid var(--line); }
-  #steps li[data-step="done"] { color:var(--ink); }
-  #steps li[data-step="now"] { background:var(--go); border-color:var(--go); color:#fff; font-weight:700; }
-  #statecard[data-state="WaitForTake"] { background:var(--go); border-color:var(--go); color:#fff;
-          text-align:center; padding:24px 14px; animation:take 1.4s ease-in-out infinite; }
-  #statecard[data-state="WaitForTake"] #state { font-size:40px; }
-  #statecard[data-state="WaitForTake"] #message { color:#fff; font-size:20px; }
-  #statecard[data-state="WaitForTake"] #steps li { color:#fff; border-color:rgba(255,255,255,.5); }
-  #statecard[data-state="WaitForTake"] #steps li[data-step="now"] { background:#fff; color:var(--go); }
-  .stale #statecard[data-state="WaitForTake"] #state::after { color:#fff; }
-  @keyframes take { 50% { box-shadow:0 0 0 8px rgba(31,111,74,.35); } }
-  @media (prefers-reduced-motion: reduce) { #statecard[data-state="WaitForTake"] { animation:none; } }
-  form { display:flex; gap:8px; flex-wrap:wrap; }
-  #text { flex:1 1 220px; font:inherit; font-size:18px; padding:12px; border-radius:10px;
-          border:1px solid var(--line); background:var(--bg); color:var(--ink); }
-  select, button.go { font:inherit; font-size:17px; padding:12px 14px; border-radius:10px;
-          border:1px solid var(--line); background:var(--bg); color:var(--ink); }
-  button.go { background:var(--go); color:#fff; border-color:var(--go); font-weight:600; }
-  button.go[aria-disabled="true"] { opacity:.45; cursor:wait; }
-  dl { display:grid; grid-template-columns:auto 1fr; gap:6px 14px; margin:0; }
-  dt { color:var(--muted); } dd { margin:0; font-variant-numeric:tabular-nums; }
-  .row { display:contents; } .row[hidden] { display:none; }
-  #thumbs { display:flex; gap:8px; flex-wrap:wrap; } #thumbs img { width:150px; max-width:100%; border-radius:8px; }
-  @media (max-width:480px) { #thumbs img { width:calc(50% - 4px); } }   /* phones: two per row, full width */
-  #reply { color:var(--muted); min-height:1.4em; }
-  .stale #state::after { content:" (no connection)"; font-size:16px; color:var(--stop); }
-  /* clarifying questions */
-  #question { margin-top:12px; font-size:20px; font-weight:600; }
-  #question[hidden] { display:none; }
-  #question small { display:block; color:var(--muted); font-size:13px; font-weight:400; }
-  #opts { display:flex; gap:8px; flex-wrap:wrap; margin-top:8px; }
-  button.opt { min-height:48px; min-width:48px; padding:10px 18px; font:inherit; font-size:18px; font-weight:600;
-               border-radius:10px; border:2px solid var(--go); background:var(--card); color:var(--ink); cursor:pointer; }
-  button.opt[aria-disabled="true"] { opacity:.45; cursor:wait; }
-  #cancel { min-height:44px; padding:8px 14px; font:inherit; font-size:15px; border-radius:10px;
-            border:1px solid var(--line); background:var(--bg); color:var(--muted); cursor:pointer; }
-  #cancel[hidden] { display:none; }
-  #setting { display:flex; align-items:center; gap:8px; margin-top:10px; color:var(--muted); min-height:44px; }
-  #setting input { width:22px; height:22px; }
+:root { color-scheme:light; --bg:#f5f4ef; --card:#fffefa; --ink:#243a32; --muted:#69756d; --line:#dddeda;
+        --go:#245641; --stop:#b83832; --stop-dark:#912923; }
+* { box-sizing:border-box; }
+html { -webkit-text-size-adjust:100%; text-size-adjust:100%; }
+body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+button,input,select { font:inherit; } button,select { touch-action:manipulation; } button { cursor:pointer; }
+button:focus-visible,input:focus-visible,select:focus-visible { outline:3px solid #a96a30; outline-offset:4px; }
+[hidden] { display:none!important; }
+main { max-width:1240px; margin:auto; padding:0 48px 30px; }
+.topbar { display:flex; align-items:center; justify-content:space-between; gap:20px; padding:28px 0; border-bottom:1px solid var(--line); }
+.brand { display:flex; align-items:center; gap:11px; }
+.mark { display:grid; place-items:center; width:36px; height:36px; border-radius:12px; background:var(--go); color:#f4f6dc; font-size:24px; }
+h1 { font-size:21px; margin:0; font-weight:650; letter-spacing:-.7px; }
+.brand-note { border-left:1px solid #cdd2ca; margin-left:8px; padding-left:18px; font-size:12px; color:var(--muted); }
+.top-status { display:flex; gap:16px; align-items:center; font-size:12px; }
+.mode { padding:6px 12px; border-radius:30px; border:1px solid #d3d8cb; background:#ecefe5; white-space:nowrap; }
+#connection { display:flex; align-items:center; gap:7px; color:var(--muted); }
+#connection::before { content:""; width:6px; height:6px; background:#75856a; border-radius:50%; }
+.intro { padding:46px 0 32px; display:flex; justify-content:space-between; align-items:end; gap:24px; }
+.eyebrow { text-transform:uppercase; letter-spacing:2px; font-size:10px; font-weight:700; color:var(--muted); }
+h2 { font-family:Georgia,"Times New Roman",serif; font-weight:400; font-size:52px; line-height:1.12; letter-spacing:-2px; margin:12px 0 14px; }
+h2 em { color:#64805c; font-weight:400; }
+.intro p { color:var(--muted); font-size:14px; margin:0; }
+.intro-note { text-align:right; max-width:185px; font-size:12px!important; line-height:1.7; }
+.workspace { display:grid; grid-template-columns:minmax(0,1.45fr) minmax(300px,1fr); gap:22px; align-items:start; }
+.card { background:var(--card); border:1px solid var(--line); border-radius:20px; padding:28px; }
+.card-label { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:24px; }
+.card-label h3 { margin:0; font-size:13px; font-weight:600; }
+.card-number { color:#8b9487; font-size:11px; font-variant-numeric:tabular-nums; }
+.request-title { font-family:Georgia,"Times New Roman",serif; font-size:29px; font-weight:400; letter-spacing:-.7px; margin:0 0 8px; }
+.help { font-size:13px; color:var(--muted); margin:0 0 24px; }
+form { display:grid; grid-template-columns:1fr auto; gap:12px; }
+.input-label { grid-column:1/-1; color:var(--muted); font-size:12px; margin-bottom:-5px; }
+#text { grid-column:1/-1; min-width:0; width:100%; border:1px solid #ccd3c7; border-radius:12px; background:#f8f9f3; color:var(--ink); padding:18px; font-size:18px; }
+#text::placeholder { color:#7c897a; }
+.select-wrap { display:flex; gap:12px; align-items:center; color:var(--muted); font-size:12px; }
+select { appearance:none; -webkit-appearance:none; height:48px; background-image:linear-gradient(45deg,transparent 50%,#69756d 50%),linear-gradient(135deg,#69756d 50%,transparent 50%); background-position:calc(100% - 15px) 21px,calc(100% - 11px) 21px; background-size:4px 4px; background-repeat:no-repeat; min-height:48px; padding:10px 28px 10px 12px; border:1px solid var(--line); border-radius:10px; background-color:var(--card); color:var(--ink); max-width:100%; }
+button.go { min-height:48px; padding:12px 22px; background:var(--go); border:1px solid var(--go); border-radius:10px; color:#fff; font-size:14px; font-weight:600; }
+button.go:hover { background:#183f2e; }
+button[aria-disabled="true"] { opacity:.5; cursor:wait; }
+#setting { display:flex; align-items:center; gap:10px; margin-top:18px; font-size:12px; color:var(--muted); min-height:44px; }
+#setting input { width:18px; height:18px; accent-color:var(--go); }
+#question { border-top:1px solid var(--line); padding-top:20px; margin-top:14px; font-size:20px; }
+#question small { display:block; margin-top:6px; font-size:12px; color:var(--muted); }
+#opts { display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; }
+button.opt { padding:10px 18px; min-height:48px; border:1px solid #a3b49b; background:#edf2e6; color:var(--ink); border-radius:10px; }
+#cancel { padding:10px 14px; min-height:44px; margin-top:10px; border:1px solid var(--line); border-radius:10px; background:var(--card); color:var(--muted); }
+#reply { font-size:13px; color:var(--muted); min-height:20px; margin-top:10px; overflow-wrap:anywhere; }
+.request-foot { border-top:1px solid var(--line); padding-top:18px; margin-top:16px; display:flex; gap:10px; align-items:center; color:var(--muted); font-size:11px; }
+.request-foot svg { flex:none; }
+.side { display:grid; gap:18px; }
+#statecard { background:#e9eedf; border-color:#dce3d1; padding:26px; transition:background .2s; }
+#state { font-family:Georgia,"Times New Roman",serif; font-size:36px; line-height:1.2; margin:6px 0 10px; letter-spacing:-1px; }
+#message { color:#53654d; font-size:13px; min-height:20px; }
+#steps { display:flex; list-style:none; gap:5px; padding:0; margin:30px 0 0; counter-reset:step; }
+#steps li { flex:1; min-width:0; font-size:10px; color:#5f7056; text-align:center; position:relative; padding-top:34px; }
+#steps li::before { counter-increment:step; content:counter(step); display:grid; place-items:center; width:24px; height:24px; border-radius:50%; background:#e9eedf; border:1px solid #aebba1; position:absolute; top:0; left:calc(50% - 12px); font-size:10px; z-index:1; }
+#steps li:not(:last-child)::after { content:""; height:1px; background:#bdc9b0; position:absolute; top:12px; left:calc(50% + 12px); width:calc(100% - 19px); }
+#steps li[data-step="now"] { color:var(--go); font-weight:700; }
+#steps li[data-step="now"]::before { background:var(--go); border-color:var(--go); color:#fff; box-shadow:0 0 0 4px #d7e0cb; }
+#steps li[data-step="done"]::before { content:"✓"; background:#c8d7bc; border-color:#a9bd9a; }
+#statecard[data-state="WaitForTake"] { background:var(--go); color:#fff; }
+#statecard[data-state="WaitForTake"] #message,#statecard[data-state="WaitForTake"] li,#statecard[data-state="WaitForTake"] .eyebrow,#statecard[data-state="WaitForTake"] h3 { color:#fff; }
+#statecard[data-state="WaitForTake"] li::before { color:var(--ink); }
+#statecard[data-state="WaitForTake"] li[data-step="now"]::before { background:#fff; }
+.stop-panel { background:#fcf3ef; border:1px solid #e8d5cf; border-radius:18px; padding:19px; }
+#stop { display:flex; align-items:center; justify-content:center; gap:12px; width:100%; min-height:76px; background:var(--stop); border:0; border-radius:11px; color:#fff; font-size:24px; font-weight:650; letter-spacing:2px; box-shadow:0 3px 0 var(--stop-dark); }
+#stop:hover { background:#a52f29; } #stop:active { transform:translateY(2px); box-shadow:0 1px 0 var(--stop-dark); }
+.stop-symbol { width:15px; height:15px; border:2px solid currentColor; border-radius:3px; }
+.stop-caption { display:flex; align-items:center; justify-content:space-between; gap:8px; margin:13px 0 0; color:#805a52; font-size:11px; }
+kbd { font:10px inherit; border:1px solid #d8beb6; padding:1px 5px; border-radius:4px; }
+#stopfail { background:#a52f29; color:white; padding:18px; border-radius:12px; margin-bottom:20px; }
+#stopfail b { display:block; font-size:20px; }
+.telemetry { margin-top:22px; display:grid; grid-template-columns:1fr 1fr; padding:0; overflow:hidden; }
+.detail-panel { padding:25px 28px; }
+.detail-panel + .detail-panel { border-left:1px solid var(--line); }
+.telemetry .card-label { margin-bottom:18px; }
+dl { display:grid; grid-template-columns:90px 1fr; gap:10px; margin:0; font-size:13px; }
+dt { color:var(--muted); } dd { margin:0; font-variant-numeric:tabular-nums; overflow-wrap:anywhere; }
+.row { display:contents; }
+#thumbs { display:flex; flex-wrap:wrap; gap:8px; } #thumbs img { width:calc(50% - 4px); border-radius:8px; }
+#cameraempty { display:flex; align-items:center; gap:14px; padding:12px 0; color:var(--muted); font-size:12px; }
+.camera-icon { display:grid; place-items:center; width:46px; height:46px; border:1px dashed #bfc9b7; border-radius:13px; flex:none; }
+#cameraempty strong { display:block; font-weight:500; font-size:13px; color:var(--ink); margin-bottom:4px; }
+footer { display:flex; justify-content:space-between; gap:16px; padding-top:24px; color:#7a8377; font-size:10px; letter-spacing:.3px; }
+#connection[data-online="false"] { color:var(--stop); } #connection[data-online="false"]::before { background:var(--stop); }
+.stale #state::after { content:" · Offline"; font:14px -apple-system,sans-serif; color:var(--stop); }
+.distance-field { grid-column:1/-1; display:grid; gap:8px; }
+.distance-field input { width:100%; min-width:0; padding:16px; border:1px solid #a3b49b; border-radius:12px; font:inherit; }
+.distance-field small { color:var(--muted); }
+#go { grid-column:1/-1; margin-top:8px; }
+#ask .select-wrap { grid-column:1/-1; margin-top:10px; }
+@media (min-width:761px) { .side { position:sticky; top:20px; } }
+@media (max-width:900px) { main { padding:0 28px 24px; } .brand-note { display:none; } h2 { font-size:46px; } .workspace { grid-template-columns:minmax(0,1.2fr) minmax(280px,1fr); } .card { padding:22px; } .select-wrap { gap:6px; } button.go { padding:12px 15px; } }
+@media (max-width:760px) {
+ main { padding:0 20px 150px; } .topbar { padding:22px 0; } .top-status { gap:8px; } #connection { font-size:0; gap:0; }
+ h1 { font-size:19px; } .intro { padding:32px 0 26px; } h2 { font-size:43px; } .intro-note { display:none; }
+ .workspace { display:flex; flex-direction:column; gap:16px; } .request-card,.side { width:100%; } .side { display:contents; }
+ #statecard { width:100%; } .stop-panel { position:fixed; bottom:0; left:0; right:0; padding:12px 20px max(12px,env(safe-area-inset-bottom)); border-radius:18px 18px 0 0; z-index:10; box-shadow:0 -6px 24px #243a3210; }
+ #stop { min-height:60px; font-size:23px; } .stop-caption { margin-top:10px; } .telemetry { grid-template-columns:1fr; margin-top:16px; }
+ .detail-panel + .detail-panel { border-left:0; border-top:1px solid var(--line); } footer { font-size:10px; } .request-title { font-size:27px; }
+ #stopfail { position:sticky; top:8px; z-index:11; } .select-wrap { flex-wrap:wrap; } .select-wrap label { display:none; }
+}
+@media (max-width:380px) { form { grid-template-columns:1fr; } .select-wrap label { display:inline; } #go { width:100%; } .mode { padding:5px 9px; } }
+@media (prefers-reduced-motion:reduce) { *,*::before,*::after { transition:none!important; scroll-behavior:auto!important; } }
+
+.tutorial-button { border:1px solid #cbd3c3; background:var(--card); color:var(--go); border-radius:30px; padding:7px 13px; min-height:40px; font-size:12px; white-space:nowrap; }
+.tutorial-button:hover { background:#e9eedf; }
+#tour { position:fixed; inset:0; z-index:1000; }
+#tour-shade { position:absolute; inset:0; background:#15281fc9; transition:background .35s; }
+#tour[data-guided="true"] #tour-shade { background:transparent; }
+#tour-ring { position:fixed; pointer-events:none; border:2px solid #c8e69c; border-radius:16px; box-shadow:0 0 0 9999px #15281fc9,0 0 0 5px #c8e69c33; transition:top .4s ease,left .4s ease,width .4s ease,height .4s ease,opacity .3s; opacity:0; }
+#tour[data-guided="true"] #tour-ring { opacity:1; }
+#tour-card { position:fixed; width:min(410px,calc(100vw - 32px)); padding:25px; background:var(--card); color:var(--ink); border:1px solid #d9dfcf; border-radius:20px; box-shadow:0 20px 70px #10201540; transition:top .4s ease,left .4s ease; max-height:calc(100dvh - 32px); overflow:auto; }
+.tour-heading { display:flex; justify-content:space-between; align-items:center; margin-bottom:18px; }
+#tour-count { font-size:10px; letter-spacing:1.5px; color:var(--muted); text-transform:uppercase; }
+#tour-close { width:44px; height:44px; border:0; background:#eef1e8; border-radius:50%; color:var(--ink); font-size:23px; margin:-10px -10px -10px 0; }
+#tour-title { font:400 28px/1.15 Georgia,serif; letter-spacing:-.6px; margin:0 0 12px; }
+#tour-description { color:var(--muted); font-size:14px; line-height:1.6; margin:0; }
+.tour-copy-enter { animation:tour-copy .35s ease both; }
+@keyframes tour-copy { from { opacity:0; transform:translateY(-10px); } to { opacity:1; transform:translateY(0); } }
+.tour-actions { display:flex; gap:10px; margin-top:24px; align-items:center; }
+#tour-next { margin-left:auto; background:var(--go); color:#fff; border:1px solid var(--go); }
+#tour-back { background:transparent; color:var(--muted); border:1px solid var(--line); }
+#tour-next,#tour-back { min-height:44px; border-radius:9px; padding:10px 16px; font-size:13px; }
+#tour-stop { margin-top:17px; width:100%; min-height:44px; border:1px solid #d7aaa2; border-radius:9px; background:#fcf0ed; color:#a02c28; font-size:12px; font-weight:650; }
+@media (prefers-reduced-motion:reduce) { .tour-copy-enter { animation:none; } }
+@media (max-width:760px) { .topbar { flex-wrap:wrap; gap:14px; } .top-status { margin-left:auto; } }
+@media (max-width:380px) { .top-status { width:100%; justify-content:flex-end; } }
 </style></head>
 <body><main>
-  <h1>FLOOR PICKER</h1>
-  <button id="stop" type="button">STOP</button>
-  <div id="stopfail" role="alert" hidden>
-    <b>STOP FAILED: hit the E-stop on the robot.</b>
-    <span id="stopwhy"></span> Trying again every second.
+  <header class="topbar">
+    <div class="brand"><span class="mark" aria-hidden="true"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M5 4v8a7 7 0 0 0 14 0V4M5 8h4m6 0h4M9 4v4m6-4v4M12 19v3"/><circle cx="12" cy="13" r="2"/></svg></span><h1>floor picker<span style="color:#8eaa72">.</span></h1><span class="brand-note">A little help, within reach.</span></div>
+    <div class="top-status"><button id="tutorial" type="button" class="tutorial-button">Tutorial <span aria-hidden="true">↗</span></button><span class="mode">__MODE__</span><span id="connection" role="status">Connecting</span></div>
+  </header>
+  <section class="intro">
+    <div><div class="eyebrow">Your everyday helping hand</div><h2>Leave the reaching<br><em>to us.</em></h2><p>Choose what you dropped. We'll take it from here.</p></div>
+    <p class="intro-note">From the floor to your hand.<br>A little more independence.</p>
+  </section>
+  <div id="stopfail" role="alert" hidden><b>STOP FAILED: hit the E-stop on the robot.</b><span id="stopwhy"></span> Trying again every second.</div>
+  <div class="workspace">
+    <section class="card request-card">
+      <div class="card-label"><h3>Make a request</h3><span class="card-number">01 / REQUEST</span></div>
+      <h3 class="request-title">How far in feet did you drop your item?</h3><p class="help">Enter an estimate, then choose your item. Turning also uses this travel budget. At the limit, we stop and check the camera.</p>
+      <form id="ask">
+        <input id="text" type="hidden" value="phone">
+        <div class="distance-field"><label for="distance">Estimated distance (feet)</label><input id="distance" type="number" inputmode="decimal" min="0" max="20" step="any" placeholder="e.g. 3.5" required aria-describedby="distance-help"><small id="distance-help">More than 0, up to 20 feet. Motor-step estimate, not exact floor distance.</small></div>
+        <div class="select-wrap"><label for="object">What did you drop?</label><select id="object" required><option value="" selected>Select an object</option><option value="phone">Phone</option></select></div>
+        <div class="select-wrap"><label for="hand">Hand-off height</label><select id="hand" aria-label="Hand height"><option value="standing" selected>Standing</option><option value="seated">Seated</option></select></div>
+        <button class="go" id="go" type="button" aria-disabled="false">Start request ↗</button>
+      </form>
+      <label id="setting" hidden><input type="checkbox" id="clarify"> Ask me questions first</label>
+      <div id="question" role="status" aria-live="polite" hidden></div><div id="opts"></div>
+      <button id="cancel" type="button" hidden>Cancel</button><div id="reply" role="status" aria-live="polite"></div>
+      <div class="request-foot"><svg width="16" height="18" viewBox="0 0 16 18" fill="none" aria-hidden="true"><path d="M8 1 14 3v5c0 4-6 8-6 8S2 12 2 8V3l6-2Z" stroke="currentColor"/><path d="m5 8 2 2 4-4" stroke="currentColor"/></svg> You're in control. Stop a request at any time.</div>
+    </section>
+    <aside class="side" aria-label="Mission and stop controls">
+      <section class="card" id="statecard">
+        <div class="card-label"><h3>Mission status</h3><span class="card-number">02 / PROGRESS</span></div>
+        <div id="state" aria-live="polite">Connecting…</div><div id="message"></div>
+        <ol id="steps" aria-label="Hand-off steps"><li id="step-Search">Search</li><li id="step-Approach">Drive</li><li id="step-Pick">Pick</li><li id="step-Present">Present</li><li id="step-WaitForTake">Take</li></ol>
+      </section>
+      <section class="stop-panel" aria-label="Stop control"><button id="stop" type="button" aria-label="STOP"><span class="stop-symbol" aria-hidden="true"></span>STOP</button><div class="stop-caption"><span>Stop motion · hold the arm</span><span>or press <kbd>Esc</kbd></span></div></section>
+    </aside>
   </div>
-  <section class="card" id="statecard">
-    <div id="state">…</div><div id="message"></div>
-    <ol id="steps" aria-label="Hand-off steps">
-      <li id="step-Search">Search</li><li id="step-Approach">Drive</li><li id="step-Pick">Pick</li>
-      <li id="step-Present">Present</li><li id="step-WaitForTake">Take</li>
-    </ol>
+  <section class="card telemetry" aria-label="Robot details">
+    <div class="detail-panel"><div class="card-label"><h3>At a glance</h3><span class="card-number">03 / DETAILS</span></div>
+      <dl><dt>Item</dt><dd id="item">–</dd><dt>Seen</dt><dd id="detection">–</dd><div class="row" id="liftrow" hidden><dt>Tray height</dt><dd id="lift"></dd></div><div class="row" id="trayrow" hidden><dt>Tray weight</dt><dd id="tray"></dd></div><dt>Last pick</dt><dd id="pick">–</dd></dl>
+    </div>
+    <div class="detail-panel"><div class="card-label"><h3>Camera view</h3><span class="card-number">04 / VISION</span></div>
+      <div id="cameraempty"><span class="camera-icon"><svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true"><rect x="3" y="6" width="18" height="14" rx="3"/><path d="m8 6 1-3h6l1 3"/><circle cx="12" cy="13" r="3.5"/></svg></span><span><strong>No camera feed available</strong>A live view appears when the robot provides one.</span></div><div id="thumbs"></div>
+    </div>
   </section>
-  <section class="card">
-    <form id="ask">
-      <input id="text" autocomplete="off" placeholder="I dropped my phone">
-      <select id="hand" aria-label="Hand height"><option value="standing" selected>Standing</option><option value="seated">Seated</option><option value="">Ask me</option></select>
-      <button class="go" id="go" type="submit" aria-disabled="false">Ask</button>
-    </form>
-    <label id="setting"><input type="checkbox" id="clarify" checked> Ask me questions first</label>
-    <div id="question" role="status" aria-live="polite" hidden></div>
-    <div id="opts"></div>
-    <button id="cancel" type="button" hidden>Cancel</button>
-    <div id="reply"></div>
-  </section>
-  <section class="card">
-    <dl>
-      <dt>Item</dt><dd id="item">–</dd>
-      <dt>Seen</dt><dd id="detection">–</dd>
-      <div class="row" id="liftrow" hidden><dt>Tray height</dt><dd id="lift"></dd></div>
-      <div class="row" id="trayrow" hidden><dt>Tray weight</dt><dd id="tray"></dd></div>
-      <dt>Last pick</dt><dd id="pick">–</dd>
-    </dl>
-    <div id="thumbs"></div>
-  </section>
+  <footer><span>FLOOR PICKER / Made for a little more ease.</span><span>__MODE_NOTE__</span></footer>
 </main>
+<div id="tour" hidden>
+  <div id="tour-shade"></div><div id="tour-ring" aria-hidden="true"></div>
+  <section id="tour-card" role="dialog" aria-modal="true" aria-labelledby="tour-title" aria-describedby="tour-description" tabindex="-1">
+    <div class="tour-heading"><span id="tour-count"></span><button id="tour-close" type="button" aria-label="Close tutorial">×</button></div>
+    <div id="tour-copy" aria-live="polite"><h2 id="tour-title"></h2><p id="tour-description"></p></div>
+    <div class="tour-actions"><button id="tour-back" type="button">Back</button><button id="tour-next" type="button">Let’s begin ↗</button></div>
+    <button id="tour-stop" type="button">STOP motion · available any time</button>
+  </section>
+</div>
+
 <script>
 const $ = id => document.getElementById(id);
 const STOP_WORDS = new RegExp(__STOP_PATTERN__, "i");   // the same check as ui/request.py
@@ -454,7 +570,6 @@ $("cancel").addEventListener("click", () => { endConversation(); $("reply").text
 // The "Ask me questions first" setting; the page works without localStorage.
 let handTouched = false;
 try { const v = localStorage.getItem("clarify"); if (v !== null) $("clarify").checked = v === "1"; } catch (e) {}
-// Standing by default, even for someone seated: the phone is easier to take held a little high.
 const syncHand = () => { if (!handTouched) $("hand").value = "standing"; };
 syncHand();
 $("hand").addEventListener("change", () => { handTouched = true; });
@@ -487,11 +602,23 @@ document.addEventListener("keydown", e => { if (e.key === "Escape") stop(); });
 
 $("ask").addEventListener("submit", e => {
   e.preventDefault();
-  return send($("text").value);
+  return startRequest();
 });
 
 // Send the box text (or a tapped option): a new request, or the answer to the pending question.
-async function send(raw) {
+function startRequest() {
+  const distance = Number($("distance").value);
+  if (!Number.isFinite(distance) || distance <= 0 || distance > 20) {
+    $("reply").textContent = "Enter a distance greater than 0 and up to 20 feet."; $("distance").focus(); return;
+  }
+  if ($("object").value !== "phone") {
+    $("reply").textContent = "Choose Phone before starting."; $("object").focus(); return;
+  }
+  endConversation(); return send("phone", true);
+}
+$("go").addEventListener("click", startRequest);
+
+async function send(raw, direct = false) {
   const text = raw.trim(); if (!text) return;
   if (STOP_WORDS.test(text)) {           // typed stop goes straight to /stop, even mid-request
     $("text").value = ""; $("reply").textContent = "Stopping";
@@ -500,16 +627,17 @@ async function send(raw) {
   }
   if (stopFailing) { $("reply").textContent = "STOP has not gone through yet."; return; }
   if (asking) return;
-  const clarify = $("clarify").checked;
+  const clarify = !direct && $("clarify").checked;
   const answering = clarify && convo.pending !== null;      // else this starts a new request
   const sent = answering ? {text: convo.text, dialog: [...convo.dialog, {question: convo.pending, answer: text}]}
                          : {text, dialog: []};
   const hand = $("hand").value;
-  const payload = clarify ? {text: sent.text, hand, clarify: true, dialog: sent.dialog}
+  const payload = direct ? {item: $("object").value, hand: hand || "standing", distance_ft: Number($("distance").value)}
+                  : clarify ? {text: sent.text, hand, clarify: true, dialog: sent.dialog}
                           : {text: sent.text, hand: hand || "standing"};
   asking = true; setAskBusy(); $("reply").textContent = "…";
   try {
-    const r = await call("/request", {method: "POST", headers: {"Content-Type": "application/json"},
+    const r = await call(direct ? "/fetch" : "/request", {method: "POST", headers: {"Content-Type": "application/json"},
                                       body: JSON.stringify(payload)}, 30000);
     if (!r.ok || !r.body || !r.body.parsed) {
       const detail = r.body && typeof r.body.detail === "string" ? `: ${r.body.detail}` : "";
@@ -542,7 +670,9 @@ async function refresh() {
     if (!r.ok || !r.body) throw new Error(`status ${r.status}`);
     const s = r.body;
     $("statecard").parentElement.classList.remove("stale");
-    $("state").textContent = title(s); $("message").textContent = s.message || "";
+    if ($("connection").textContent !== "Connected") $("connection").textContent = "Connected"; $("connection").setAttribute("data-online", "true");
+    if ($("state").textContent !== title(s)) $("state").textContent = title(s);
+    $("message").textContent = s.message || "";
     $("statecard").dataset.state = s.state;
     const at = STEPS.indexOf(s.state);
     STEPS.forEach((n, i) => $("step-" + n).setAttribute("data-step", i < at ? "done" : i === at ? "now" : "todo"));
@@ -553,6 +683,7 @@ async function refresh() {
     if (s.lift_mm != null) $("lift").textContent = `${Math.round(s.lift_mm)} mm`;
     if (s.tray_g != null) $("tray").textContent = `${Math.round(s.tray_g)} g`;
     $("pick").textContent = s.last_pick ? `${s.last_pick.result} (${s.last_pick.grasp}, ${s.last_pick.seconds} s)` : "–";
+    $("cameraempty").hidden = (s.cameras || []).length > 0;
     const names = (s.cameras || []).join(",");
     if (names !== shown) {
       shown = names;
@@ -568,9 +699,90 @@ async function refresh() {
       img.dataset.busy = "1";
       img.src = `/thumb/${encodeURIComponent(img.dataset.name)}?t=${Date.now()}`;
     }
-  } catch (e) { $("statecard").parentElement.classList.add("stale"); }
+  } catch (e) { $("statecard").parentElement.classList.add("stale"); if ($("connection").textContent !== "Disconnected") $("connection").textContent = "Disconnected"; $("connection").setAttribute("data-online", "false"); }
   finally { refreshing = false; }
 }
+
+// The tutorial never activates a target control or sends a fetch request.
+const TOUR_STEPS = [
+  {target:null, title:"Welcome, let’s help you use Floor Picker", text:"A quick tour of choosing your item, setting your hand-off height and staying in control."},
+  {target:"distance", title:"About how far away?", text:"Type an estimate in feet, such as 3.5. This caps estimated wheel travel, including turns. At the limit the robot stops and checks the camera; it won’t drive farther or return on its own."},
+  {target:"object", title:"Choose your object", text:"Select Phone from this list. Choosing an object won’t start the robot."},
+  {target:"hand", title:"Choose your hand-off height", text:"Choose Seated or Standing to tell Floor Picker how you’d like the item handed to you. Set this before starting your request."},
+  {target:"go", title:"Start when you’re ready", text:"With distance, Phone and hand-off height set, tap Start request. The camera guides the approach within your estimate. This tutorial never starts motion."},
+  {target:"stop", title:"You can stop at any time", text:"Watch Mission status to follow along. Hit STOP whenever you need to stop motion and hold the arm. You can also press Esc."}
+];
+let tourIndex = -1, tourFrame = null, tourUntil = 0, tourReturnFocus = null;
+function placeTour() {
+  if (tourIndex < 0) return;
+  const step = TOUR_STEPS[tourIndex], card = $("tour-card"), ring = $("tour-ring");
+  const vw = window.innerWidth, vh = window.innerHeight, margin = 16;
+  const width = Math.min(410, vw - margin * 2);
+  card.style.width = width + "px";
+  const height = card.offsetHeight;
+  let left = (vw - width) / 2, top = Math.max(margin, (vh - height) / 2);
+  if (step.target) {
+    const box = $(step.target).getBoundingClientRect();
+    ring.style.left = (box.left - 6) + "px"; ring.style.top = (box.top - 6) + "px";
+    ring.style.width = (box.width + 12) + "px"; ring.style.height = (box.height + 12) + "px";
+    left = Math.max(margin, Math.min(vw - width - margin, box.left));
+    top = box.bottom + 20;
+    if (top + height > vh - margin) top = box.top - height - 20;
+    top = Math.max(margin, Math.min(vh - height - margin, top));
+  } else {
+    ring.style.left = (vw / 2 - 20) + "px"; ring.style.top = (vh / 2 - 20) + "px";
+    ring.style.width = "40px"; ring.style.height = "40px";
+  }
+  card.style.left = left + "px"; card.style.top = top + "px";
+}
+function trackTour() {
+  cancelAnimationFrame(tourFrame);
+  tourUntil = performance.now() + 750;
+  const tick = () => { placeTour(); if (tourIndex >= 0 && performance.now() < tourUntil) tourFrame = requestAnimationFrame(tick); };
+  tourFrame = requestAnimationFrame(tick);
+}
+function showTourStep(index) {
+  tourIndex = index;
+  const step = TOUR_STEPS[index];
+  $("tour").hidden = false;
+  $("tour").dataset.guided = String(Boolean(step.target));
+  $("tour-title").textContent = step.title; $("tour-description").textContent = step.text;
+  $("tour-count").textContent = `Quick tour / ${index + 1} of ${TOUR_STEPS.length}`;
+  $("tour-back").hidden = index === 0;
+  $("tour-next").textContent = index === 0 ? "Let’s begin ↗" : index === TOUR_STEPS.length - 1 ? "Got it ✓" : "Next →";
+  $("tour-copy").classList.remove("tour-copy-enter");
+  void $("tour-copy").offsetWidth; $("tour-copy").classList.add("tour-copy-enter");
+  if (step.target) {
+    const behavior = window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "instant" : "smooth";
+    if (window.innerWidth <= 760 && step.target !== "stop") {
+      window.scrollTo({top:Math.max(0, $(step.target).getBoundingClientRect().top + window.scrollY - 90), behavior});
+    } else $(step.target).scrollIntoView({block:"center", behavior});
+  }
+  placeTour(); trackTour();
+  $("tour-next").focus({preventScroll:true});
+}
+function closeTour() {
+  if (tourIndex < 0) return;
+  tourIndex = -1; cancelAnimationFrame(tourFrame); $("tour").hidden = true;
+  if (tourReturnFocus && tourReturnFocus.isConnected) tourReturnFocus.focus({preventScroll:true});
+}
+$("tutorial").addEventListener("click", () => { tourReturnFocus = document.activeElement; showTourStep(0); });
+$("tour-next").addEventListener("click", () => tourIndex === TOUR_STEPS.length - 1 ? closeTour() : showTourStep(tourIndex + 1));
+$("tour-back").addEventListener("click", () => { if (tourIndex > 0) showTourStep(tourIndex - 1); });
+$("tour-close").addEventListener("click", closeTour);
+$("tour-stop").addEventListener("click", () => { closeTour(); stop(); });
+document.addEventListener("scroll", () => { if (tourIndex >= 0) trackTour(); }, true);
+globalThis.addEventListener?.("resize", () => { if (tourIndex >= 0) trackTour(); });
+document.addEventListener("keydown", e => {
+  if (tourIndex < 0) return;
+  if (e.key === "Escape") { closeTour(); return; } // Existing Escape handler still sends STOP.
+  if (e.key !== "Tab") return;
+  const controls = [...$("tour-card").querySelectorAll("button")].filter(b => !b.hidden && !b.disabled);
+  const first = controls[0], last = controls[controls.length - 1];
+  if (e.shiftKey && (document.activeElement === first || !controls.includes(document.activeElement))) { e.preventDefault(); last.focus(); }
+  else if (!e.shiftKey && (document.activeElement === last || !controls.includes(document.activeElement))) { e.preventDefault(); first.focus(); }
+});
+
 setInterval(refresh, 500); refresh();
 </script></body></html>
 """.replace("__STOP_PATTERN__", json.dumps(request_mod.STOP_WORDS.pattern)).replace(
