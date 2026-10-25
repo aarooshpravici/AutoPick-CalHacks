@@ -192,6 +192,16 @@ def scripted_waiter(leader, follower, targets: dict, tolerance_deg: float = 0.5,
 
 # --- teaching ----------------------------------------------------------------
 
+def follow_step(cmd: dict, target: dict, max_step: float) -> dict:
+    """One frame of following the leader: each arm joint of cmd moves at most max_step degrees
+    towards target, and the claw goes straight to target's (LeRobot's max_relative_target still
+    caps it per command). Updates cmd in place and returns it. Also used by training/record.py."""
+    for j in ARM_JOINTS:
+        cmd[j] += max(-max_step, min(max_step, target[j] - cmd[j]))
+    cmd["gripper"] = target["gripper"]
+    return cmd
+
+
 def _same_pose(a: dict, b: dict) -> bool:
     return all(abs(a[j] - b[j]) < SAME_POSE_DEG for j in ARM_JOINTS)
 
@@ -238,11 +248,7 @@ def teach(leader, follower, speed_deg_s: float, wait_for=enter_waiter, log=print
             while True:
                 pressed = wait_for(name, prompt)
                 while not pressed.is_set():
-                    target = leader.read()
-                    for j in ARM_JOINTS:
-                        cmd[j] += max(-max_step, min(max_step, target[j] - cmd[j]))
-                    cmd["gripper"] = target["gripper"]
-                    follower.command(cmd)
+                    follower.command(follow_step(cmd, leader.read(), max_step))
                     clock.sleep(dt)
                 pose = follower.read()
                 if name in POSE_NAMES and last_name is not None and _same_pose(pose, recorded[last_name]):
