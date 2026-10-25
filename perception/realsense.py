@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
+import sys
 import time
 import uuid
 
@@ -78,13 +79,29 @@ class RealSense:
             import pyrealsense2
             self.sdk = pyrealsense2
         rs = self.sdk
-        pipe = self._call(rs.pipeline)
-        cfg = self._call(rs.config)
-        self._call(lambda: cfg.enable_stream(rs.stream.color, *self.settings.colour,
-                                            rs.format.bgr8, self.settings.fps))
-        self._call(lambda: cfg.enable_stream(rs.stream.depth, *self.settings.depth,
-                                            rs.format.z16, self.settings.fps))
-        self._call(lambda: pipe.start(cfg))
+        def open_once():
+            # A failed start can partially open UVC streams. Never retry start
+            # on that same pipeline: release it and reconstruct the attempt.
+            pipe = rs.pipeline()
+            try:
+                cfg = rs.config()
+                cfg.enable_stream(rs.stream.color, *self.settings.colour,
+                                  rs.format.bgr8, self.settings.fps)
+                cfg.enable_stream(rs.stream.depth, *self.settings.depth,
+                                  rs.format.z16, self.settings.fps)
+                pipe.start(cfg)
+                return pipe
+            except BaseException as error:
+                print(f"RealSense startup failed: {error}", file=sys.stderr, flush=True)
+                try:
+                    pipe.stop()
+                except RuntimeError:
+                    # stop() may reject a pipeline whose start never completed.
+                    pass
+                del pipe
+                raise
+
+        pipe = self._call(open_once)
         self.pipeline = pipe
         try:
             profile = self._call(pipe.get_active_profile)
