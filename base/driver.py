@@ -195,6 +195,20 @@ class BaseDriver:
             self._send("STOP")
             self._condition.notify_all()
 
+    def stop_and_wait(self, timeout=.4):
+        """Wait for firmware's stopped acknowledgment without blocking UI callers."""
+        deadline = time.monotonic() + timeout
+        with self._condition:
+            self.stop()
+            ticket = self._stop_generation
+            while self._stop_acked < ticket:
+                self._healthy()
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    self._fault = TimeoutError("STOP acknowledgment missing")
+                    raise self._fault
+                self._condition.wait(remaining)
+
     def lift_home(self):
         self._lift_blocked = True
         self.stop()

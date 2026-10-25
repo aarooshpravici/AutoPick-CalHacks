@@ -31,6 +31,7 @@ base:
   right_coil_pins: [2, 3, 4, 5]
   invert_left: false                 # Verify direction with wheels raised.
   invert_right: false
+  drive_calibrated: false           # Requires measured loaded speed, direction and turning.
   wiring_confirmed: false            # Set only after HW1 wiring/power check.
   estop_sense_pin: -1                # No sense wire specified; physical E-stop still required.
   max_speed_mm_s: 30                 # PROVISIONAL; replace after loaded speed/turn measurement.

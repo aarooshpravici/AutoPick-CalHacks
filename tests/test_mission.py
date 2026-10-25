@@ -196,3 +196,28 @@ def test_ui_routes_use_real_mission_stop_and_status(make):
         assert response.json()['brain_ms'] < 50
         assert client.get('/status').json()['state'] == 'Stopped'
         assert client.get('/thumb/wrist').status_code == 404
+
+
+def test_missing_stop_ack_prevents_pick(make):
+    class NoAck(FakeSerial):
+        def write(self, data):
+            result = super().write(data)
+            with self._lock:
+                self._lines = type(self._lines)(line for line in self._lines if line != b'OK STOP\n')
+            return result
+    called = []
+    brain = make(port=NoAck(), pick=lambda *a, **k: called.append(True))
+    brain.request('phone', 'seated')
+    wait_for(lambda: brain._io_error)
+    assert not called
+    assert brain.status()['state'] == 'Failed'
+    # Teardown can report the intentionally failed serial link.
+    brain._io_error = None
+
+
+def test_real_gate_does_not_connect_with_unmeasured_base(config, monkeypatch):
+    import arm.real
+    monkeypatch.setattr(arm.real, 'RealArm', lambda *a, **k: pytest.fail('opened arm'))
+    config['base']['wiring_confirmed'] = True
+    with pytest.raises(RuntimeError, match='loaded-drive'):
+        build(config, sim=False)
