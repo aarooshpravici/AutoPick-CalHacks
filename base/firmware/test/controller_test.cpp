@@ -60,5 +60,19 @@ int main() {
     bounded.wheel_steps(99, -119, 10);
     bounded.wheel_steps(109, -109, 10);
     assert(bounded.limit_reached);
+    // Plain decimal only: no hex floats, inf/nan words, or stray characters.
+    Controller numbers(true, 100, 200, 2000);
+    for (auto bad : {"LIMIT 0x1p3", "LIMIT 0X10", "LIMIT 1p3", "LIMIT infinity", "LIMIT INF", "LIMIT NaN",
+                     "LIMIT 1e", "LIMIT e5", "LIMIT .", "LIMIT +", "LIMIT 1e+", "LIMIT 1..2", "LIMIT 1e1.5",
+                     "LIMIT --1", "LIMIT 1f", "LIMIT 1,5", "LIMIT 1e999"})
+        assert(send(numbers, bad) == "ERR invalid travel limit");
+    for (auto good : {"LIMIT 5", "LIMIT +5", "LIMIT 5.", "LIMIT .5", "LIMIT 0.5e1", "LIMIT 5E0", "LIMIT 50e-1"})
+        assert(send(numbers, good) == "OK LIMIT");
+    for (auto bad : {"DRIVE 0x10 0", "DRIVE 0 0x1p1", "DRIVE nan 0", "DRIVE 1e 0"})
+        assert(send(numbers, bad) == "ERR invalid speed");
+    assert(send(numbers, "DRIVE 1.5e1 -.5").empty());
+    // CRLF endings are tolerated (controller strips them; main strips before INFO).
+    assert(send(numbers, "PING\r") == "PONG" && send(numbers, "STOP\r") == "OK STOP");
+    assert(send(numbers, "LIMIT 7\r") == "OK LIMIT" && send(numbers, "DRIVE 1 1\r").empty());
     std::cout << "protocol, lift absence, ramp, STOP, 300ms watchdog, estop, malformed input, disabled pins, rollover: PASS\n";
 }

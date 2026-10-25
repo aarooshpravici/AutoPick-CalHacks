@@ -15,6 +15,7 @@ class DriverTests(unittest.TestCase):
 
     def test_protocol_commands(self):
         self.driver.ping()
+        self.driver.set_travel_limit(1000)
         self.driver.drive(50, -25)
         self.assertEqual((self.port.left, self.port.right), (50, -25))
         self.driver.stop()
@@ -26,9 +27,10 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(self.driver.tray_grams(), 125)
         self.driver.tare()
         self.assertEqual(self.driver.tray_grams(), 0)
-        self.assertEqual(self.port.commands[:7], ["PING", "DRIVE 50 -25", "STOP", "STOP", "LIFT_HOME", "STOP", "LIFT_TO 700"])
+        self.assertEqual(self.port.commands[1:8], ["LIMIT 1000.000000", "DRIVE 50 -25", "STOP", "STOP", "LIFT_HOME", "STOP", "LIFT_TO 700"])
 
     def test_lift_stops_wheels_before_raising(self):
+        self.driver.set_travel_limit(1000)
         self.driver.lift_home()
         self.driver.drive(50, 50)
         self.driver.lift_to(700)
@@ -66,6 +68,7 @@ class DriverTests(unittest.TestCase):
     def test_watchdog_without_renewal(self):
         now = [0.0]
         port = FakeSerial(clock=lambda: now[0])
+        port.write(b"LIMIT 1000\n")
         port.write(b"DRIVE 100 100\n")
         now[0] = 0.299
         port.readline()
@@ -172,6 +175,7 @@ class DriverTests(unittest.TestCase):
         self.driver.ping()
 
     def test_close_stops_wheels_and_closes_thread(self):
+        self.driver.set_travel_limit(100)
         self.driver.drive(10, 10)
         self.driver.close()
         self.assertTrue(self.port.closed)

@@ -7,16 +7,27 @@ Controller controller(wiring::confirmed, wiring::max_speed_mm_s,
                       wiring::acceleration_mm_s2, wiring::stop_acceleration_mm_s2);
 const float steps_per_mm = wiring::half_steps_per_rev / (PI * wiring::wheel_diameter_mm);
 
+constexpr uint32_t hold_ms = 30000;
 struct Wheel {
     const int* pins;
     bool inverted;
     CoilStepper motor;
+    uint32_t active_ms = 0; // Last time the wheel moved, or had nothing to release.
     void begin() {
         for (int i = 0; i < 4; ++i) { pinMode(pins[i], OUTPUT); digitalWrite(pins[i], LOW); }
     }
     void update(float speed, uint32_t now, bool emergency) {
-        // Holding means retaining the last phase, never releasing coils on STOP.
-        if (motor.update(emergency ? 0 : speed, now, steps_per_mm, inverted))
+        // STOP/watchdog retain the last phase to hold, but only for hold_ms: an
+        // idle energised coil overheats the motor, ULN2003 and buck. The next step
+        // after a DRIVE re-energises. Unsigned subtraction is wrap-safe.
+        if (emergency) speed = 0;
+        const uint32_t ms = millis();
+        if (speed != 0 || !motor.mask) active_ms = ms;
+        else if (uint32_t(ms - active_ms) >= hold_ms) {
+            motor.mask = 0;
+            for (int i = 0; i < 4; ++i) digitalWrite(pins[i], LOW);
+        }
+        if (motor.update(speed, now, steps_per_mm, inverted))
             for (int i = 0; i < 4; ++i) digitalWrite(pins[i], (motor.mask >> i) & 1);
     }
 };
@@ -54,13 +65,15 @@ void loop() {
     controller.wheel_steps(left.motor.steps, right.motor.steps, steps_per_mm);
     controller.tick(now, emergency);
     // Bound RX work per loop so an input flood cannot starve the watchdog.
+    bool replied = false;
     for (int n = 0; n < 32 && Serial.available(); ++n) {
         const char c = char(Serial.read());
         if (c == '\x18') { // CAN: discard a partial monitor line without executing it.
             controller.halt(); used = 0; overflow = false;
         } else if (c == '\n') {
-            if (overflow) { controller.halt(); reply("ERR line too long"); }
+            if (overflow) { controller.halt(); reply("ERR line too long"); replied = true; }
             else {
+                while (used && (input[used - 1] == '\r' || input[used - 1] == ' ' || input[used - 1] == '\t')) --used;
                 input[used] = '\0';
                 if (!strcmp(input, "INFO")) {
                     char info[192];
@@ -69,16 +82,19 @@ void loop() {
                              int(wiring::confirmed), int(wiring::estop_sense >= 0),
                              speed_um_s / 1000, speed_um_s % 1000, wiring::config_id);
                     reply(info);
-                    used = 0; overflow = false;
-                    continue;
+                    replied = true;
+                } else {
+                    const char* response = controller.command(input, now);
+                    if (!strcmp(response, "OK STOP")) {
+                        if (pending_stops < 64) ++pending_stops;
+                        else { reply("ERR too many STOP requests"); replied = true; }
+                    } else if (*response) { reply(response); replied = true; }
                 }
-                const char* response = controller.command(input, now);
-                if (!strcmp(response, "OK STOP")) {
-                    if (pending_stops < 64) ++pending_stops;
-                    else reply("ERR too many STOP requests");
-                } else reply(response);
             }
             used = 0; overflow = false;
+            // Each synchronous reply costs ms of UART time: leave further input
+            // for the next loop so the watchdog tick stays prompt under a flood.
+            if (replied) break;
         } else if (c == '\0' || (static_cast<unsigned char>(c) < 32 && c != '\r' && c != '\t')) {
             overflow = true; controller.halt();
         } else if (used + 1 < sizeof(input) && !overflow) input[used++] = c;

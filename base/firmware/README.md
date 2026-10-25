@@ -21,20 +21,34 @@ together; older firmware rejects LIMIT before any mission drive. Wheel speeds ar
 half steps, not encoders. Stretch commands return `ERR no lift`; lift/weight
 fields are zero. A 300 ms timeout since the last valid DRIVE stops stepping;
 PING/malformed traffic cannot renew it. STOP decelerates quickly then replies
-OK STOP. Both STOP and watchdog keep the last coil phase energised to hold;
-physical power removal cannot hold position. Coils are off at boot.
+OK STOP. Both STOP and watchdog keep the last coil phase energised to hold for
+30 s of continuous stop (INFO still reports `hold=1`); then all coils are
+de-energised so an idle base cannot overheat the motors, ULN2003 or buck. The
+gearbox resists back-driving, but position is not actively held after 30 s idle
+or on power removal. The next accepted DRIVE re-energises. Coils are off at boot.
 
 Pin map, direction inversions, nominal 4096 half steps/rev, wheel geometry and
 limits are generated from config/robot.yaml. Speed is provisionally capped at
 30 mm/s (not the old 200), with 30 mm/s² normal and 300 mm/s² stop acceleration.
 Measured loaded speed and turn rate are still required. Each loop emits at most
-one half step per wheel, never blocks for a motor move, and bounds serial work.
+one half step per wheel, never blocks for a motor move, and bounds serial work:
+at most one reply-producing line per loop, so a flood of INFO/PING cannot delay
+the watchdog beyond 300 ms plus one loop. Trailing CR/space/tab are stripped
+before matching, and numbers are plain decimal only (no hex, inf or nan).
+`generate_config.py` rejects configs that are not four distinct pins per side,
+have accel > 1000 mm/s^2 or stop accel below normal, or need over 1000 half steps/s.
 Serial TX congestion may drop a reply; the Mac treats a missing reply as fault.
 
 No E-stop sense wire is specified (`estop_sense_pin: -1`). STAT estop=0 therefore
 means uninstrumented, NOT verified safe. The physical switch must cut motor
 power, including the 5 V buck feed. If HW1 supplies an isolated/contact sense
 wire, configure a free pin; never feed 12 V into the Uno pin.
+The sense input is `INPUT_PULLUP`, active-low (LOW = pressed), so a broken or
+unplugged wire reads "not pressed". Sensing is therefore advisory and is not
+fail-safe: the wiring must be a loop whose normal state is not-pressed (open) and
+that shorts to ground only when the E-stop is pressed, and a break is undetectable.
+A true normally-closed fail-safe loop would need active-high polarity, which this
+firmware does not implement. The physical power cut remains the safety function.
 
 Build without uploading:
 
@@ -47,7 +61,7 @@ Build without uploading:
 The Apple Silicon build uses pinned GCC ARM 14.2.1 because the platform's default
 GCC package is Intel-only. Arduino core 1.6.0 has a TinyUSB void-return diagnostic;
 `-Wno-error=return-mismatch` retains it as a warning. The board build succeeds
-(3328 bytes RAM, 45092 bytes flash); this is compile evidence, not bench acceptance.
+(3380 bytes RAM, 46204 bytes flash); this is compile evidence, not bench acceptance.
 
 PlatformIO Core 6.1.18; pinned `renesas-ra@1.9.0`, board `uno_r4_wifi`:
 https://docs.platformio.org/en/latest/boards/renesas-ra/uno_r4_wifi.html

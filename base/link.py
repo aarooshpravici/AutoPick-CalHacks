@@ -44,7 +44,11 @@ def main(argv=None):
         parser.error('use --list or explicitly select --port')
     import serial
     import yaml
-    config = yaml.safe_load(args.config.read_text())['base']
+    full = yaml.safe_load(args.config.read_text())
+    config = full['base']
+    normalize = lambda p: p.replace('/dev/tty.', '/dev/cu.')
+    if normalize(args.port) in [normalize(full['arm'][key]) for key in ('follower_port', 'leader_port')]:
+        parser.error('refusing an arm port')
     try:
         port = serial.Serial(args.port, baudrate=config['baud'], timeout=.05, write_timeout=.1, exclusive=True)
         with BaseDriver(port, max_speed_mm_s=config['max_speed_mm_s'], max_lift_mm=1000, timeout=2) as driver:

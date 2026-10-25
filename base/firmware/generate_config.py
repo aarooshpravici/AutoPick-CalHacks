@@ -1,5 +1,6 @@
 """Generate the firmware pin map from robot.yaml; --check detects stale headers."""
 import argparse
+import math
 from pathlib import Path
 import yaml
 
@@ -20,16 +21,28 @@ def config_id(base):
 def render(base):
     if base['controller'] != 'uno_r4_wifi':
         raise ValueError('this firmware requires uno_r4_wifi')
+    for side in ('left_coil_pins', 'right_coil_pins'):
+        side_pins = base[side]
+        if not isinstance(side_pins, list) or len(side_pins) != 4 or len(set(side_pins)) != 4:
+            raise ValueError(f'{side} needs exactly four distinct pins')
     pins = base['left_coil_pins'] + base['right_coil_pins']
     if len(pins) != 8 or len(set(pins)) != 8 or any(type(p) is not int or not 2 <= p <= 13 for p in pins):
         raise ValueError('eight distinct digital coil pins in 2..13 required')
-    import math
     for name in ('wheel_diameter_mm', 'half_steps_per_rev', 'max_speed_mm_s',
                  'acceleration_mm_s2', 'stop_acceleration_mm_s2'):
         if not math.isfinite(base[name]) or base[name] <= 0:
             raise ValueError(f'{name} must be positive and finite')
     if base['max_speed_mm_s'] > 50:
         raise ValueError('28BYJ-48 build cap is 50 mm/s; revalidate hardware before increasing')
+    if base['acceleration_mm_s2'] > 1000 or base['stop_acceleration_mm_s2'] > 1000:
+        raise ValueError('accelerations are capped at 1000 mm/s^2')
+    if base['stop_acceleration_mm_s2'] < base['acceleration_mm_s2']:
+        raise ValueError('stop acceleration must be at least the normal acceleration')
+    # The loop issues at most one half step per wheel per pass; 28BYJ-48 also stalls
+    # well below this rate under load.
+    rate = base['max_speed_mm_s'] * base['half_steps_per_rev'] / (math.pi * base['wheel_diameter_mm'])
+    if rate > 1000:
+        raise ValueError(f'max speed needs {rate:.0f} half steps/s; limit is 1000')
     for key in ('wiring_confirmed', 'invert_left', 'invert_right'):
         if type(base[key]) is not bool:
             raise ValueError(f'{key} must be boolean')

@@ -20,10 +20,12 @@ struct TestUART {
     int availableForWrite() { return 0; }
     int available() { return int(input.size()); }
     int read() { char c=input.front(); input.pop_front(); return c; }
+    // UART::write is synchronous: 115200 baud 8N1 is ~87 us per byte of loop time.
     size_t write(const uint8_t* bytes, size_t length) {
-        output.append(reinterpret_cast<const char*>(bytes), length); return length;
+        output.append(reinterpret_cast<const char*>(bytes), length);
+        test_time_us += 87 * length; return length;
     }
-    size_t write(uint8_t byte) { output += char(byte); return 1; }
+    size_t write(uint8_t byte) { output += char(byte); test_time_us += 87; return 1; }
     void feed(const std::string& text) { for (char c: text) input.push_back(c); }
 };
 inline TestUART Serial;

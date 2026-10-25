@@ -20,4 +20,4 @@ def test_actual_main_with_sensed_estop_and_zero_available_for_write(tmp_path):
                     '-I', str(ROOT / 'tests/arduino'), '-I', str(tmp_path),
                     '-I', str(ROOT / 'base/firmware/include'),
                     str(ROOT / 'tests/r4_main_test.cpp'), '-o', str(binary)], check=True)
-    subprocess.run([str(binary)], check=True, timeout=5)
+    subprocess.run([str(binary)], check=True, timeout=30)

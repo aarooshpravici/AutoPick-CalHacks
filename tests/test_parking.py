@@ -79,3 +79,16 @@ def test_visual_no_progress_stops_without_claiming_wheel_encoder_feedback():
     assert not command.done and command.left == command.right == 0
     assert 'no visual progress' in command.reason
     assert p.update([.22, 0], frame=4, age=0, now=11).done is False
+
+
+def test_guard_config_cannot_be_loosened():
+    import copy, pytest
+    base = yaml.safe_load((Path(__file__).parents[1] / 'config/robot.yaml').read_text())
+    for key, good, bad in (('approach_progress_timeout_s', 15, 15.1), ('pickup_max_distance_m', .33, .34)):
+        config = copy.deepcopy(base)
+        config['navigation'][key] = good
+        Parking(config)
+        for value in (bad, 1e9, float('inf'), float('nan'), True, 0, -1):
+            config['navigation'][key] = value
+            with pytest.raises(ValueError, match='at most|positive'):
+                Parking(config)
