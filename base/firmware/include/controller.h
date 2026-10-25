@@ -100,8 +100,21 @@ private:
         return x + std::max(-step, std::min(step, target - x));
     }
     static bool number(const char* value, float& result) {
-        char* end = nullptr;
-        result = strtof(value, &end);
-        return end != value && *end == '\0' && std::isfinite(result);
+        // Plain decimal only (no hex floats, inf, nan): [+-]digits[.digits][e[+-]digits].
+        const char* p = value;
+        if (*p == '+' || *p == '-') ++p;
+        int digits = 0;
+        while (*p >= '0' && *p <= '9') { ++p; ++digits; }
+        if (*p == '.') { ++p; while (*p >= '0' && *p <= '9') { ++p; ++digits; } }
+        if (!digits) return false;
+        if (*p == 'e' || *p == 'E') {
+            ++p;
+            if (*p == '+' || *p == '-') ++p;
+            if (*p < '0' || *p > '9') return false;
+            while (*p >= '0' && *p <= '9') ++p;
+        }
+        if (*p) return false;
+        result = strtof(value, nullptr);
+        return std::isfinite(result);
     }
 };
