@@ -37,7 +37,7 @@ import threading
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
 from fastapi import FastAPI, HTTPException
 from fastapi.concurrency import run_in_threadpool
@@ -130,6 +130,12 @@ class RequestBody(BaseModel):
     dialog: list[Turn] = []   # questions already asked for this request and the answers, oldest first
 
 
+class FetchBody(BaseModel):
+    """A selected UI item, never arbitrary serial instructions or model output."""
+    item: Literal["phone"]
+    hand: Literal["seated", "standing"] = "seated"
+
+
 class _StopCount:
     """How many STOPs so far. A request parsed across a STOP is dropped."""
 
@@ -176,6 +182,29 @@ def create_app(brain: Brain, parse=request_mod.parse_request, clarify=request_mo
         stop_now()
         return {"stopped": True, "brain_ms": round((time.monotonic() - t0) * 1000, 1)}
 
+    async def dispatch_fetch(parsed, hand, seen):
+        def begin():
+            # Recheck after waiting for a thread: a queued request must not undo STOP.
+            if stops.value != seen:
+                return False
+            brain.request(parsed["item"], hand)
+            return True
+        try:
+            accepted = await run_in_threadpool(begin)
+        except ValueError as error:
+            raise HTTPException(422, str(error)) from error
+        if not accepted or stops.value != seen:
+            if accepted:
+                brain.stop()
+            return {"parsed": parsed, "dropped": "stopped"}
+        return {"parsed": parsed}
+
+    @app.post("/fetch")
+    async def fetch_selected(body: FetchBody):
+        # A Phone click needs no natural-language model or external API.
+        parsed = {"action": "fetch", "item": body.item, "hand": body.hand}
+        return await dispatch_fetch(parsed, body.hand, stops.value)
+
     @app.post("/request")
     async def post_request(body: RequestBody):
         # stop wins, before the hand check, the dialog check or the parser
@@ -199,12 +228,7 @@ def create_app(brain: Brain, parse=request_mod.parse_request, clarify=request_mo
         if parsed["action"] == "stop":
             stop_now()
         elif parsed["action"] == "fetch":
-            if stops.value != seen:                    # STOP arrived while parsing
-                return {"parsed": parsed, "dropped": "stopped"}
-            await run_in_threadpool(brain.request, parsed["item"], hand)
-            if stops.value != seen:                    # STOP raced with request(): make sure it wins
-                brain.stop()
-                return {"parsed": parsed, "dropped": "stopped"}
+            return await dispatch_fetch(parsed, hand, seen)
         return {"parsed": parsed}
 
     @app.get("/status")
@@ -589,11 +613,12 @@ async function send(raw, direct = false) {
   const sent = answering ? {text: convo.text, dialog: [...convo.dialog, {question: convo.pending, answer: text}]}
                          : {text, dialog: []};
   const hand = $("hand").value;
-  const payload = clarify ? {text: sent.text, hand, clarify: true, dialog: sent.dialog}
+  const payload = direct ? {item: "phone", hand: hand || "seated"}
+                  : clarify ? {text: sent.text, hand, clarify: true, dialog: sent.dialog}
                           : {text: sent.text, hand: hand || "seated"};
   asking = true; setAskBusy(); $("reply").textContent = "…";
   try {
-    const r = await call("/request", {method: "POST", headers: {"Content-Type": "application/json"},
+    const r = await call(direct ? "/fetch" : "/request", {method: "POST", headers: {"Content-Type": "application/json"},
                                       body: JSON.stringify(payload)}, 30000);
     if (!r.ok || !r.body || !r.body.parsed) {
       const detail = r.body && typeof r.body.detail === "string" ? `: ${r.body.detail}` : "";
