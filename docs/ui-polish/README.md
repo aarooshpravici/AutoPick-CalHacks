@@ -48,3 +48,10 @@ focus wrapping was checked at 320 px. Reduced-motion CSS disables transitions.
 ![Phone explanation on desktop](tutorial-desktop.png)
 
 ![Phone explanation on mobile](tutorial-mobile.png)
+
+Distance-form update (PR #57):
+
+- [Desktop form](distance-desktop.png): feet estimate, explicit Phone selection, Standing/Seated, Start request.
+- [Mobile tutorial](distance-tutorial-mobile.png) and [small mobile tutorial](distance-tutorial-small-mobile.png): six steps, tested for aligned unobscured highlights, focus containment, Back/Done/Close and STOP, without starting a mission.
+
+Earlier Phone-button captures above show the previous design.

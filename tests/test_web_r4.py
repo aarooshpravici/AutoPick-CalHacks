@@ -139,3 +139,49 @@ def test_selected_item_rejects_serial_injection():
         for payload in [{'item': 'DRIVE 30 30'}, {'item': 'sock'}, {'item': 'phone', 'hand': 'ceiling'}]:
             assert client.post('/fetch', json=payload).status_code == 422
     assert brain.calls == []
+
+@pytest.mark.parametrize('value', [0, -1, 21, '3', True, 'nan', None])
+def test_bad_distance_never_starts(value):
+    # Legacy omission remains supported; explicit null is invalid.
+    from ui.server import FakeBrain
+    with TestClient(create_app(FakeBrain())) as client:
+        response = client.post('/fetch', json={'item': 'phone', 'distance_ft': value})
+        assert response.status_code == 422
+
+
+@pytest.mark.parametrize("seen_at_limit", [False, True])
+def test_feet_limit_reaches_r4_and_stays_stopped(wire, tmp_path, seen_at_limit):
+    driver, commands = wire
+    config = yaml.safe_load((ROOT / 'config/robot.yaml').read_text())
+    class BoundarySource(Source):
+        def poll(self):
+            self.parked = seen_at_limit and driver.limit_reached
+            return super().poll()
+    source = BoundarySource()
+    picked = []
+    brain = Mission(config, base=driver, arm=SimArm(), source=source,
+                    navigator_factory=lambda: RealNavigation(config, MeasuredMapStandIn()),
+                    pick=lambda *a, **kw: picked.append(True), log_dir=tmp_path, period=.02)
+    try:
+        with TestClient(create_app(brain)) as client:
+            assert client.post('/fetch', json={'item': 'phone', 'distance_ft': .01}).status_code == 200
+            wait_for(lambda: brain.status()['state'] == 'Stopped')
+            expected = 'Item seen, but travel limit reached' if seen_at_limit else 'not found at travel limit'
+            assert expected in brain.status()['message']
+            assert 'LIMIT 3.048000' in commands
+            first_drive = next(i for i, c in enumerate(commands) if c.startswith('DRIVE '))
+            assert commands.index('LIMIT 3.048000') < first_drive
+            status = driver.status()
+            travel = (abs(status.left_steps) + abs(status.right_steps)) / 2 * (3.14159265 * 71 / 4096)
+            assert 0 < travel <= 3.048
+            assert not picked
+            count = len(commands)
+            time.sleep(.3)
+            assert not any(c.startswith('DRIVE ') for c in commands[count:])
+            # STOP holds the budget latch; a direct accidental DRIVE cannot resume.
+            driver.drive(15, 15)
+            time.sleep(.15)
+            assert driver.limit_reached
+            assert driver.status().left_steps == status.left_steps
+    finally:
+        brain.close()

@@ -6,17 +6,17 @@ A page served by SW2's localhost cannot reach a USB cable on SW1's Mac.
 
 ```text
 Browser on either laptop/phone
-    Phone → POST /fetch {"item":"phone","hand":"seated"}
+    Form → POST /fetch {"item":"phone","hand":"standing","distance_ft":3.5}
     text  → POST /request {"text":"I dropped my phone","hand":"seated"}
                      ↓
 SW1 Mac: FastAPI → Mission → camera-guided search/parking → BaseDriver
                      ↓ USB serial, 115200 baud
-Uno R4: DRIVE <left_mm_s> <right_mm_s> / STOP
+Uno R4: LIMIT <mm> / DRIVE <left_mm_s> <right_mm_s> / STOP
                      ↓
 Four wheel motors
 ```
 
-Phone clicks bypass the language model. Text requests retain the existing parser.
+The distance-and-object form bypasses the language model. Text requests retain the existing parser.
 The R4 receives bounded wheel commands, not natural language or arbitrary code.
 The Mac refreshes commands while navigating. Firmware's 300 ms watchdog stops on
 lost DRIVE commands; STOP decelerates and replies `OK STOP` before pickup starts.
@@ -109,3 +109,38 @@ commanded steps are not real odometry. These tests do not claim a physical run.
 ```sh
 .venv/bin/python -m pytest -q tests/test_web_r4.py
 ```
+
+## Distance form and R4 travel budget
+
+The page now asks **“How far in feet did you drop your item?”**, then requires
+Phone selection and retains Standing/Seated. **Start request** posts
+`{"item":"phone","hand":"standing","distance_ft":3.5}` to `/fetch`.
+The six-step tutorial explains distance, object, height, start and STOP.
+Accepted estimates are finite numbers greater than zero, up to 20 feet.
+
+Mission acknowledges STOP, sends `LIMIT 1066.800000` for 3.5 ft, waits for
+`OK LIMIT`, then starts existing camera-guided search/approach. This does **not**
+mean blindly driving 3.5 ft forward: there is no direction input. Search turns
+also consume the budget. A reachable, measured parking spot permits an earlier
+pickup. The 33 cm pickup guard is independent of the user's travel estimate.
+Its provisional origin is the floor below the camera; SW1 must verify the
+camera-to-arm offset and the measured target on the final base.
+
+The R4 counts mean absolute left/right issued half-step travel, including turns
+and reversals. It stops one half-step before exhausting the budget, keeps coils
+energized and emits `LIMIT REACHED`. Further DRIVE cannot restart it; STOP and
+the watchdog preserve the budget. A new acknowledged LIMIT while stopped is
+needed for another mission. Boot requires LIMIT before any DRIVE.
+These step counts do not measure wheel slip or real floor displacement.
+
+On exhaustion the brain waits for STOP acknowledgment, then a newly captured
+RealSense frame. It reports item seen, item not found, or no fresh frame after
+2 seconds, and remains **Stopped**. It does not start an arm pick, drive past
+the estimate, reverse or turn again automatically. Reposition and submit a new
+request after checking the area. Existing camera loss, STOP and search/approach
+timeouts can stop a mission earlier.
+
+Deploy this firmware, driver and brain together on SW1's Mac/R4. Older firmware
+rejects LIMIT: the mission fails closed before DRIVE. Legacy `/request` and
+`/fetch` callers omitting distance get a 20 ft default; the visible form always
+requires an explicit estimate. No real motion or flash was performed by SW2.

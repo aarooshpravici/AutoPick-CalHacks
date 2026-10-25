@@ -16,7 +16,7 @@ function el(id) {
     els[id] = {
       id, textContent: "", value: "", hidden: id === "stopfail", attrs: {}, children: [], placeholder: "",
       checked: id === "clarify", className: "",         // the setting is on by default
-      dataset: {}, listeners,
+      dataset: {}, listeners, focus() {},
       set innerHTML(v) { this.children = []; },
       get innerHTML() { return ""; },
       addEventListener(type, fn) { listeners[type] = fn; },
@@ -46,7 +46,7 @@ globalThis.fetch = (url, opts = {}) => {
 };
 const count = path => seen.filter(p => p === path).length;
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-const submit = text => { el("text").value = text; return el("ask").listeners.submit({preventDefault() {}}); };
+const submit = text => send(text);
 const clickStop = () => el("stop").listeners.click();
 // The question page shows: its option buttons' labels, and a tap on one.
 const options = () => el("opts").children.map(b => b.textContent);
@@ -66,8 +66,16 @@ vm.runInThisContext(fs.readFileSync(scriptPath, "utf8"));
 const scenarios = {
   async phone_button_sends_structured_fetch_without_parser() {
     routes["/fetch"] = opts => { bodies.push(JSON.parse(opts.body)); return reply(200, {parsed: FETCH}); };
+    for (const value of ["", "0", "-1", "Infinity", "21", "abc"]) {
+      el("distance").value = value; el("object").value = "phone";
+      await el("go").listeners.click();
+    }
+    el("distance").value = "3.5"; el("object").value = "";
     await el("go").listeners.click();
-    assert.deepStrictEqual(bodies, [{item:"phone", hand:"standing"}]);
+    assert.strictEqual(count("/fetch"), 0);
+    el("object").value = "phone";
+    await el("ask").listeners.submit({preventDefault() {}});
+    assert.deepStrictEqual(bodies, [{item:"phone", hand:"standing", distance_ft:3.5}]);
     assert.strictEqual(count("/request"), 0);
     assert.strictEqual(count("/fetch"), 1);
   },

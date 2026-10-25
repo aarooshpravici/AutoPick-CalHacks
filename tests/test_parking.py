@@ -47,3 +47,24 @@ def test_ideal_straight_approach_converges():
         if cmd.done:
             break
     assert cmd.done and abs(x - p.target[0]) <= p.tolerance
+
+
+def test_pickup_range_guard_even_inside_parking_tolerance():
+    p = controller()
+    p.target = (.32, 0)
+    # .34 is within the .03 parking tolerance but beyond the .33 reach limit.
+    for frame in range(5):
+        command = p.update([.34, 0], frame=frame, age=0, now=0)
+        assert not command.done
+        assert command.left > 0 and command.right > 0
+    for frame in range(5, 8):
+        command = p.update([.325, 0], frame=frame, age=0, now=0)
+    assert command.done
+
+
+def test_pickup_range_rejects_unreachable_parking_configuration():
+    import pytest
+    cfg = yaml.safe_load((Path(__file__).parents[1] / 'config/robot.yaml').read_text())
+    cfg['perception']['parking_spot_floor_m'] = [.5, 0]
+    with pytest.raises(ValueError, match='exceeds pickup range'):
+        Parking(cfg)
