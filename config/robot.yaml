@@ -50,3 +50,14 @@ lift:
   standing_hand_mm: 1000
   taken_weight_drop_g: 50
 items: [phone]                        # stretch: glasses, pill_bottle, remote, pen, sock
+navigation:                         # Draft B5/B6 settings; physical acceptance pending.
+  detection_max_age_s: 0.3
+  settle_frames: 3
+  approach_timeout_s: 120
+  approach_speed_mm_s: 20
+  linear_gain: 0.8
+  angular_gain: 1.5
+  aligned_angle_deg: 8
+  search_speed_mm_s: 15
+  search_step_deg: 30
+  search_pause_s: 0.5
