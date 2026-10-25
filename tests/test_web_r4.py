@@ -132,7 +132,7 @@ def test_link_probe_never_drives(wire):
     driver, commands = wire
     result = check(driver)
     assert result['pong'] and result['stop_acknowledged']
-    assert commands == ['\x18', 'STOP', 'PING', 'INFO']
+    assert commands == ['\x18', 'PING', 'STOP', 'PING', 'INFO']
     assert result['firmware']['limit']
     assert not result['firmware']['estop_sensed']
     assert result['warnings']
@@ -231,6 +231,6 @@ def test_installed_firmware_configuration_mismatch_refuses_jog(wire):
     cfg['base']['wiring_confirmed'] = True
     cfg['base']['invert_left'] = True  # Header in this emulator was compiled with false.
     with pytest.raises(RuntimeError, match='configuration differs'):
-        jog(driver, cfg, 'forward', 5, .1, 10)
+        jog(driver, cfg, 'forward', 5, .1, 10, real=True)
     assert not any(c.startswith('DRIVE ') for c in commands)
     assert commands[-1] == 'STOP'
