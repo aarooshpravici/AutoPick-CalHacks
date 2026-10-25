@@ -29,9 +29,11 @@ uint32_t last_status = 0;
 unsigned pending_stops = 0;
 
 void reply(const char* message) {
-    // Never block the watchdog waiting for serial TX space.
+    // Uno R4 NO_USB Serial is UART: inherited availableForWrite() always returns
+    // zero. UART::write transmits synchronously (~87 us/byte at 115200 baud).
+    // RX is capped at 32 bytes per loop; replies/status are bounded short lines.
     const size_t length = strlen(message);
-    if (length && Serial.availableForWrite() >= int(length + 1)) {
+    if (length) {
         Serial.write(reinterpret_cast<const uint8_t*>(message), length);
         Serial.write('\n');
     }
@@ -54,10 +56,22 @@ void loop() {
     // Bound RX work per loop so an input flood cannot starve the watchdog.
     for (int n = 0; n < 32 && Serial.available(); ++n) {
         const char c = char(Serial.read());
-        if (c == '\n') {
+        if (c == '\x18') { // CAN: discard a partial monitor line without executing it.
+            controller.halt(); used = 0; overflow = false;
+        } else if (c == '\n') {
             if (overflow) { controller.halt(); reply("ERR line too long"); }
             else {
                 input[used] = '\0';
+                if (!strcmp(input, "INFO")) {
+                    char info[192];
+                    const long speed_um_s = lroundf(wiring::max_speed_mm_s * 1000);
+                    snprintf(info, sizeof(info), "INFO floorpicker-r4 2 limit=1 hold=1 watchdog_ms=300 wiring=%d estop_sense=%d max_mm_s=%ld.%03ld config=%s",
+                             int(wiring::confirmed), int(wiring::estop_sense >= 0),
+                             speed_um_s / 1000, speed_um_s % 1000, wiring::config_id);
+                    reply(info);
+                    used = 0; overflow = false;
+                    continue;
+                }
                 const char* response = controller.command(input, now);
                 if (!strcmp(response, "OK STOP")) {
                     if (pending_stops < 64) ++pending_stops;
@@ -74,8 +88,7 @@ void loop() {
         left.update(controller.left, micros(), emergency);
         right.update(controller.right, micros(), emergency);
     }
-    if (pending_stops && controller.left == 0 && controller.right == 0
-            && Serial.availableForWrite() >= 8) {
+    if (pending_stops && controller.left == 0 && controller.right == 0) {
         reply("OK STOP");
         --pending_stops;
     }

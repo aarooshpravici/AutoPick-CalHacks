@@ -179,6 +179,14 @@ class Mission:
     def thumbnail(self, name):
         return None
 
+    def _arm_ready(self):
+        position = self.arm.read()
+        frozen = self.config['arm'].get('frozen_joints', [])
+        joints = ('shoulder_pan', 'shoulder_lift', 'elbow_flex', 'wrist_flex', 'wrist_roll')
+        return all(joint in position and math.isfinite(position[joint]) and
+                   abs(position[joint] - self.poses['ready'][joint]) <= 5
+                   for joint in joints if joint not in frozen)
+
     def _base_io(self):
         while not self._closed.is_set():
             self._wake_io.wait(.05)
@@ -192,19 +200,29 @@ class Mission:
                 generation = self._generation
                 cancelled = self._token.is_set()
                 pending_limit = self._limit_pending
+                arm_busy = self._pick_thread is not None and self._pick_thread.is_alive()
             try:
                 if halt:
                     self.base.stop_and_wait()
                     self._event("serial", command="STOP")
                     with self._lock:
                         self._stop_completed = stop_ticket
-                elif pending_limit and pending_limit[0] == generation and not cancelled:
-                    self.base.set_travel_limit(pending_limit[1])
-                    with self._lock:
-                        if generation == self._generation and not self._token.is_set():
-                            self._limit_pending = None
-                            self._limit_ready = True
-                    self._event("serial", command="LIMIT", mm=pending_limit[1])
+                elif pending_limit and pending_limit[0] == generation and not cancelled and not arm_busy:
+                    ready = self._arm_ready()  # Read only, after STOP, before any base motion.
+                    if not ready:
+                        with self._lock:
+                            if generation == self._generation:
+                                self._token.set()
+                                self._limit_pending = None
+                                self._halt()
+                                self._state_to("Stopped", "Arm is not at taught ready pose; return it safely before driving")
+                    else:
+                        self.base.set_travel_limit(pending_limit[1])
+                        with self._lock:
+                            if generation == self._generation and not self._token.is_set():
+                                self._limit_pending = None
+                                self._limit_ready = True
+                        self._event("serial", command="LIMIT", mm=pending_limit[1])
                 elif desired and desired[0] == generation and not cancelled:
                     self.base.drive(*desired[1])
                     self._event("serial", command="DRIVE", speeds=desired[1])
@@ -220,7 +238,7 @@ class Mission:
                     self._io_error = str(error)
                     self._token.set()
                     self._desired = None
-                    self._state_to("Failed", "Base connection failed; use E-stop")
+                    self._state_to("Failed", f"Control connection failed: {error}; use E-stop")
                 try:
                     self.base.stop()
                 except Exception:
@@ -453,10 +471,11 @@ def build_real(config):
         import serial
         from arm.real import RealArm
         source = UdpDetections(config["perception"]["detections_udp"])
-        port = serial.Serial(cfg["serial_port"], baudrate=cfg["baud"], timeout=.05, write_timeout=.1)
+        port = serial.Serial(cfg["serial_port"], baudrate=cfg["baud"], timeout=.05, write_timeout=.1, exclusive=True)
         base = BaseDriver(port, max_speed_mm_s=cfg["max_speed_mm_s"], max_lift_mm=1000)
         base.status(timeout=3)
-        base.stop_and_wait()
+        base.synchronize()
+        base.verify_firmware(cfg)
         arm_cfg = config["arm"]
         arm = RealArm(arm_cfg["follower_port"], arm_cfg["follower_id"],
                       float(arm_cfg["max_relative_target_deg"]), frozen=arm_cfg.get("frozen_joints", ()))

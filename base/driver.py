@@ -69,11 +69,11 @@ class BaseDriver:
         if fake:
             port = FakeSerial(max_speed_mm_s=base["max_speed_mm_s"], max_lift_mm=max_lift,
                               wheel_diameter_mm=base["wheel_diameter_mm"],
-                              steps_per_rev=base.get("half_steps_per_rev", 1600))
+                              steps_per_rev=base.get("half_steps_per_rev", 1600), config=base)
         else:
             import serial
             port = serial.Serial(base["serial_port"], baudrate=base["baud"],
-                                 timeout=0.05, write_timeout=0.1)
+                                 timeout=0.05, write_timeout=0.1, exclusive=True)
         return cls(port, max_speed_mm_s=base["max_speed_mm_s"], max_lift_mm=max_lift,
                    timeout=timeout)
 
@@ -131,7 +131,7 @@ class BaseDriver:
         if self._closed.is_set():
             raise RuntimeError("serial driver closed")
         if self._fault is not None:
-            raise RuntimeError("serial link failed; reconnect before continuing") from self._fault
+            raise RuntimeError(f"serial link failed: {self._fault}; reconnect before continuing") from self._fault
 
     def _request(self, command, matches):
         # Single outstanding request because the frozen protocol has no request IDs.
@@ -177,6 +177,57 @@ class BaseDriver:
                 if remaining <= 0:
                     raise TimeoutError("no STAT received")
                 self._condition.wait(remaining)
+
+    def fresh_status(self, *, after, timeout=.4):
+        deadline = time.monotonic() + timeout
+        with self._condition:
+            while True:
+                self._healthy()
+                if self._status is not None and self._status.received_at > after:
+                    return self._status
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("no fresh STAT received")
+                self._condition.wait(remaining)
+
+    def synchronize(self, timeout=.4):
+        """Cancel partial RX text and halt, then require a fresh STOP acknowledgment."""
+        self._send("\x18")
+        self.stop_and_wait(timeout=timeout)
+
+    def firmware_info(self):
+        reply = self._request("INFO", lambda reply: reply.startswith("INFO "))
+        try:
+            tag, family, version, *tokens = reply.split()
+            fields = dict(token.split("=", 1) for token in tokens)
+            if family != "floorpicker-r4" or version != "2" or len(fields) != len(tokens):
+                raise ValueError("unexpected firmware identity")
+            if fields['limit'] != '1' or fields['hold'] != '1' or fields['watchdog_ms'] != '300':
+                raise ValueError("required LIMIT/hold/watchdog capabilities missing")
+            if fields['wiring'] not in ('0','1') or fields['estop_sense'] not in ('0','1'):
+                raise ValueError("invalid firmware flags")
+            if len(fields['config']) != 16 or any(c not in '0123456789abcdef' for c in fields['config']):
+                raise ValueError("invalid firmware configuration fingerprint")
+            speed = finite(fields['max_mm_s'])
+            if not 0 < speed <= 50:
+                raise ValueError("invalid firmware speed cap")
+            return dict(family=family, version=int(version), limit=True, hold=True,
+                        watchdog_ms=300, wiring=fields['wiring']=='1',
+                        estop_sensed=fields['estop_sense']=='1', max_speed_mm_s=speed,
+                        config_id=fields['config'])
+        except (ValueError, KeyError) as error:
+            raise RuntimeError(f"incompatible R4 INFO: {error}") from error
+
+    def verify_firmware(self, base, *, require_ready=True):
+        from base.firmware.generate_config import config_id
+        info = self.firmware_info()
+        if info['config_id'] != config_id(base):
+            raise RuntimeError("R4 firmware configuration differs from robot.yaml; regenerate/review/reflash together")
+        if not math.isclose(info['max_speed_mm_s'], float(base['max_speed_mm_s']), rel_tol=1e-6, abs_tol=.0005):
+            raise RuntimeError("R4 speed cap differs from robot.yaml")
+        if require_ready and not info['wiring']:
+            raise RuntimeError("R4 motor outputs disabled: wiring has not been confirmed in installed firmware")
+        return info
 
     def set_travel_limit(self, mm):
         mm = finite(mm)
@@ -276,8 +327,9 @@ class FakeSerial:
     verifies protocol behavior, not lift mechanics or electrical safety.
     """
     def __init__(self, *, max_speed_mm_s=200, max_lift_mm=1000, wheel_diameter_mm=72,
-                 clock=time.monotonic, has_lift=False, lift_speed_mm_s=None, steps_per_rev=1600):
+                 clock=time.monotonic, has_lift=False, lift_speed_mm_s=None, steps_per_rev=1600, config=None):
         self.clock = clock
+        self.config = config
         self.max_speed = max_speed_mm_s
         self.max_lift = max_lift_mm
         self.has_lift = has_lift
@@ -354,7 +406,18 @@ class FakeSerial:
             parts = command.split()
             reply = None
             try:
-                if parts == ["PING"]:
+                if parts == ["\x18"]:
+                    self.left = self.right = 0
+                elif parts == ["INFO"]:
+                    if self.config is None:
+                        reply = "ERR INFO unavailable in this fake configuration"
+                    else:
+                        from base.firmware.generate_config import config_id
+                        cfg = self.config
+                        reply = (f"INFO floorpicker-r4 2 limit=1 hold=1 watchdog_ms=300 "
+                                 f"wiring={int(cfg['wiring_confirmed'])} estop_sense={int(cfg['estop_sense_pin'] >= 0)} "
+                                 f"max_mm_s={cfg['max_speed_mm_s']:g} config={config_id(cfg)}")
+                elif parts == ["PING"]:
                     reply = "PONG"
                 elif len(parts) == 2 and parts[0] == "LIMIT":
                     mm = finite(parts[1])

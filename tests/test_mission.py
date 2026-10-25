@@ -330,7 +330,7 @@ def test_real_builder_selects_matching_pose_mode(config, monkeypatch, grasp, mod
     class Floor:
         def parking(self): return config['perception']['parking_spot_floor_m']
     monkeypatch.setattr(perception.floor.FloorMap, 'load', lambda *a, **kw: Floor())
-    monkeypatch.setattr(serial, 'Serial', lambda *a, **kw: FakeSerial())
+    monkeypatch.setattr(serial, 'Serial', lambda *a, **kw: FakeSerial(config=config['base']))
     monkeypatch.setattr(mission, 'UdpDetections', lambda *a: FakeDetections())
     monkeypatch.setattr(arm.real, 'RealArm', lambda *a, **kw: SimArm())
     monkeypatch.setattr(mission, 'Mission', lambda config, **kw: kw)
@@ -340,3 +340,19 @@ def test_real_builder_selects_matching_pose_mode(config, monkeypatch, grasp, mod
         assert result['simulated'] is False
     finally:
         result['base'].close(); result['source'].close(); result['arm'].close()
+
+
+def test_extended_arm_refuses_base_motion_and_can_retry_after_manual_ready(make):
+    from arm.sim import DEFAULT_POSES
+    arm = SimArm()
+    arm.pos.update(DEFAULT_POSES['at_object'])
+    port = FakeSerial()
+    brain = make(arm=arm, port=port)
+    brain.request('phone', 'standing')
+    wait_for(lambda: brain.status()['state'] == 'Stopped')
+    assert 'ready pose' in brain.status()['message']
+    assert not any(c.startswith('DRIVE ') for c in port.commands)
+    # Stand-in for a person safely returning the arm; the brain never auto-moves it.
+    arm.pos.update(DEFAULT_POSES['ready'])
+    brain.request('phone', 'standing')
+    assert wait_for(lambda: brain.status()['last_pick'])['result'] == 'taken'

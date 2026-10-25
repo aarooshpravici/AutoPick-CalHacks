@@ -1,4 +1,4 @@
-"""HTTP -> mission -> pyserial -> PTY -> actual R4 Controller core; no hardware."""
+"""HTTP -> mission -> pyserial -> PTY -> actual R4 main.cpp; no hardware."""
 import os
 from pathlib import Path
 import pty
@@ -37,8 +37,14 @@ def emulator(tmp_path_factory):
     compiler = shutil.which('c++')
     if not compiler:
         pytest.skip('native C++ compiler required for firmware transport integration')
-    binary = tmp_path_factory.mktemp('r4-emulator') / 'controller'
+    directory = tmp_path_factory.mktemp('r4-emulator')
+    binary = directory / 'controller'
+    from base.firmware.generate_config import render
+    config = yaml.safe_load((ROOT / 'config/robot.yaml').read_text())['base']
+    config['wiring_confirmed'] = True
+    (directory / 'pinmap.h').write_text(render(config))
     subprocess.run([compiler, '-std=c++17', '-Wall', '-Wextra', '-Werror',
+                    '-I', str(ROOT / 'tests/arduino'), '-I', str(directory),
                     '-I', str(ROOT / 'base/firmware/include'),
                     str(ROOT / 'tests/r4_serial_emulator.cpp'), '-o', str(binary)], check=True)
     return binary
@@ -54,8 +60,8 @@ def wire(emulator):
     reader = threading.Thread(target=lambda: commands.extend(line.strip() for line in process.stderr), daemon=True)
     reader.start()
     driver = BaseDriver(port, max_speed_mm_s=30, max_lift_mm=1000, timeout=1)
-    driver.status(timeout=2)
     try:
+        driver.status(timeout=2)
         yield driver, commands
     finally:
         driver.close()
@@ -126,7 +132,10 @@ def test_link_probe_never_drives(wire):
     driver, commands = wire
     result = check(driver)
     assert result['pong'] and result['stop_acknowledged']
-    assert commands == ['PING', 'STOP']
+    assert commands == ['\x18', 'STOP', 'PING', 'INFO']
+    assert result['firmware']['limit']
+    assert not result['firmware']['estop_sensed']
+    assert result['warnings']
 
 
 def test_selected_item_rejects_serial_injection():
@@ -187,3 +196,41 @@ def test_feet_limit_reaches_r4_and_stays_stopped(wire, tmp_path, seen_at_limit):
             assert driver.status().left_steps == status.left_steps
     finally:
         brain.close()
+
+
+def test_partial_monitor_drive_is_discarded_without_executing(wire):
+    driver, commands = wire
+    driver.set_travel_limit(100)
+    driver.port.write(b'DRIVE 30 30')  # Leftover line with no newline: must NEVER be executed.
+    result = check(driver)
+    assert result['stop_acknowledged']
+    time.sleep(.15)
+    assert driver.status().left_steps == driver.status().right_steps == 0
+    assert not any(command == 'DRIVE 30 30' for command in commands)
+
+
+def test_actual_main_watchdog_stops_even_while_info_traffic_continues(wire):
+    driver, _ = wire
+    driver.set_travel_limit(100)
+    driver.drive(20, 20)
+    start = time.monotonic()
+    while time.monotonic() - start < .5:
+        driver.firmware_info()
+        time.sleep(.05)
+    stopped = driver.status()
+    assert stopped.left_steps > 0
+    time.sleep(.2)
+    assert driver.status().left_steps == stopped.left_steps
+    assert driver.status().right_steps == stopped.right_steps
+
+
+def test_installed_firmware_configuration_mismatch_refuses_jog(wire):
+    from base.jog import jog
+    driver, commands = wire
+    cfg = yaml.safe_load((ROOT / 'config/robot.yaml').read_text())
+    cfg['base']['wiring_confirmed'] = True
+    cfg['base']['invert_left'] = True  # Header in this emulator was compiled with false.
+    with pytest.raises(RuntimeError, match='configuration differs'):
+        jog(driver, cfg, 'forward', 5, .1, 10)
+    assert not any(c.startswith('DRIVE ') for c in commands)
+    assert commands[-1] == 'STOP'

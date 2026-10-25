@@ -16,11 +16,11 @@ def config():
 
 @pytest.mark.parametrize('direction,signs', [('forward',(1,1)), ('back',(-1,-1)), ('left',(-1,1)), ('right',(1,-1))])
 def test_jog_directions_are_budgeted_then_stopped(config, direction, signs):
-    port = FakeSerial()
+    port = FakeSerial(config=config['base'])
     with BaseDriver(port, max_speed_mm_s=30, max_lift_mm=1000) as driver:
         result = jog(driver, config, direction, 5, .08, 10)
         assert result['stop_acknowledged']
-        assert port.commands[:2] == ['STOP', 'LIMIT 10.000000']
+        assert port.commands[:4] == ['\x18', 'STOP', 'INFO', 'LIMIT 10.000000']
         assert f'DRIVE {5*signs[0]} {5*signs[1]}' in port.commands
         assert port.commands[-1] == 'STOP'
         assert port.left == port.right == 0
@@ -37,7 +37,8 @@ def test_jog_attempts_stop_on_interruption(config):
     driver.drive.side_effect = KeyboardInterrupt
     with pytest.raises(KeyboardInterrupt):
         jog(driver, config, 'forward', 5, 1, 10)
-    assert driver.stop_and_wait.call_count == 2
+    driver.synchronize.assert_called_once()
+    assert driver.stop_and_wait.call_count == 1
 
 
 def test_real_jog_refuses_noninteractive_before_opening_ports(config, tmp_path, monkeypatch):

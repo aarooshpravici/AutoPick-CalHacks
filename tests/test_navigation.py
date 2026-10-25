@@ -24,7 +24,9 @@ def test_real_parking_needs_matching_calibration_and_fresh_distinct_frames():
     nav.observe(5, 0, None)
     assert nav.approach(detection) == (False, (0, 0))
     detection['bbox_px'] = [0, 0, 20, 20]
-    assert nav.approach(detection) == (False, (0, 0))
+    import pytest
+    with pytest.raises(RuntimeError, match='outside the calibrated'):
+        nav.approach(detection)
 
 
 def test_invalid_navigation_is_rejected_before_hardware():

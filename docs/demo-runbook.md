@@ -123,7 +123,7 @@ cd "/Users/aarooshkurchania/Desktop/Cal Hacks/AutoPick-CalHacks" && /opt/minicon
 cd "/Users/aarooshkurchania/Desktop/Cal Hacks/AutoPick-CalHacks" && /opt/miniconda3/envs/lerobot/bin/python -m base.link --list
 ```
 
-6. R4 link check: PING, STAT and STOP only, never DRIVE. Use the same port as `base.serial_port`. Look for `"pong": true` and `"stop_acknowledged": true`.
+6. R4 link check: CAN/STOP synchronization, PING, STAT and INFO, never DRIVE. Use the same port as `base.serial_port`. Look for `"pong": true` and `"stop_acknowledged": true`.
 
 ```bash
 cd "/Users/aarooshkurchania/Desktop/Cal Hacks/AutoPick-CalHacks" && /opt/miniconda3/envs/lerobot/bin/python -m base.link --port /dev/cu.usbmodemREPLACE_WITH_R4

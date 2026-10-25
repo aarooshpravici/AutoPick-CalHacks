@@ -43,7 +43,7 @@ Select the R4's listed `/dev/cu...` port explicitly, then:
 .venv/bin/python -m base.link --port /dev/cu.REPLACE_WITH_R4_PORT
 ```
 
-This sends **PING and STOP only**, waits for PONG/STAT/OK STOP and reports a
+This sends **CAN/STOP synchronization, PING and INFO**, waits for PONG/STAT/OK STOP and reports a
 round-trip time. It does not send DRIVE, flash firmware, validate motor wiring,
 or measure physical stopping time. The board must already run the reviewed R4
 firmware. Opening USB can reset a microcontroller; perform the initial link check

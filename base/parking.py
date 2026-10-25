@@ -23,6 +23,11 @@ class Parking:
             raise ValueError('pickup range must be positive and finite')
         if math.hypot(*self.target) > self.pickup_max:
             raise ValueError('measured parking target exceeds pickup range; verify camera/arm reference')
+        self.progress_timeout = self.cfg.get('approach_progress_timeout_s', 10)
+        if not isinstance(self.progress_timeout, (int, float)) or not math.isfinite(self.progress_timeout) or self.progress_timeout <= 0:
+            raise ValueError('approach progress timeout must be positive and finite')
+        self.best_error = math.inf
+        self.progress_at = None
         self.started = None
         self.last_frame = None
         self.settled = 0
@@ -48,6 +53,12 @@ class Parking:
                 self.settled += 1
             self.last_frame = frame
             return Command(done=self.settled >= self.cfg['settle_frames'])
+        error = math.hypot(dx, dy)
+        if error < self.best_error - .005:
+            self.best_error, self.progress_at = error, now
+        elif self.progress_at is not None and now - self.progress_at >= self.progress_timeout:
+            self.failure = 'approach made no visual progress; check traction or obstruction'
+            return Command(reason=self.failure)
         self.settled = 0
         self.last_frame = frame
         if dx < -self.tolerance or x <= 0:

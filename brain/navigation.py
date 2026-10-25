@@ -42,6 +42,8 @@ class RealNavigation:
     def approach(self, detection):
         x1, _, x2, y2 = detection['bbox_px']
         floor = self.floor.map([(x1+x2)/2, y2])
+        if floor is None:
+            raise RuntimeError('Phone is outside the calibrated floor area; reposition manually')
         reported = detection['floor_m']
         if floor is None or reported is None or math.dist(floor, reported) > .001:
             floor = None  # Missing/different publisher calibration must never park.

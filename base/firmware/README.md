@@ -70,3 +70,25 @@ Bench checklist, ONLY after wiring repair and explicit area-clear approval:
 
 A compile/native test does not satisfy these checks. Slow/weak steppers may make
 a staged, manually parked arm demo the practical fallback.
+
+## R4 serial compatibility and deployment
+
+On the Uno R4 NO_USB build, Serial is UART and inherits Print's
+`availableForWrite() == 0`. Never gate these bounded replies on that value.
+The actual `main.cpp` is compiled in both native and HTTP/PTY integration tests,
+with that zero-return UART model. Tests also cover sensed E-stop hold/release,
+line overflow, watchdog under INFO traffic, and cancellation of a partial DRIVE.
+UART writes are synchronous; these tests do not substitute for real timing checks.
+
+`INFO` reports firmware family `floorpicker-r4`, revision `2`, LIMIT/hold/300 ms
+watchdog support, whether outputs and E-stop sensing are configured, speed cap
+and a 16-hex fingerprint of the generated hardware settings. There are no float
+printf conversions in the response (the embedded C library may omit them).
+Regenerate `pinmap.h` after verified hardware configuration changes, then build
+and have the person flash it. Driver/firmware/config must agree before a real
+mission or jog; the link checker can report a matching disabled build.
+
+Host startup sends CAN (0x18), which halts and discards an unfinished RX line,
+then requires a STOP acknowledgment. A plain newline could execute a leftover
+DRIVE from a serial monitor, so it is deliberately not used to flush that input.
+`base.link` never sends DRIVE or resets a travel budget.

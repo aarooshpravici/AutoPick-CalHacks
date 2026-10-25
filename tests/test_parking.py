@@ -68,3 +68,14 @@ def test_pickup_range_rejects_unreachable_parking_configuration():
     cfg['perception']['parking_spot_floor_m'] = [.5, 0]
     with pytest.raises(ValueError, match='exceeds pickup range'):
         Parking(cfg)
+
+
+def test_visual_no_progress_stops_without_claiming_wheel_encoder_feedback():
+    p = controller()
+    first = p.update([.5, 0], frame=1, age=0, now=0)
+    assert first.left > 0
+    p.update([.498, 0], frame=2, age=0, now=5)  # Tiny jitter is not progress.
+    command = p.update([.5, 0], frame=3, age=0, now=10)
+    assert not command.done and command.left == command.right == 0
+    assert 'no visual progress' in command.reason
+    assert p.update([.22, 0], frame=4, age=0, now=11).done is False

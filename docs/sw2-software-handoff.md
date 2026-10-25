@@ -37,7 +37,7 @@ The non-moving link checker is a separate **person-run USB check**:
 /opt/miniconda3/envs/lerobot/bin/python -m base.link --port /dev/cu.REPLACE_WITH_R4_PORT
 ```
 
-It sends only PING/STOP. Opening USB may reset the controller; use motor power
+It sends CAN/STOP synchronization, PING and INFO. Opening USB may reset the controller; use motor power
 off for the first link check. Keep other serial programs closed. STAT estop=0
 is not proof of a working physical E-stop when `estop_sense_pin: -1`.
 
@@ -158,3 +158,34 @@ Send back: exact commit, both preflight JSON outputs, link-check JSON, observed
 wheel directions/STOP results, live detection log and whether the phone pickup
 was visually successful. Do not claim the autonomous demo passed from unit
 tests or an unverified suction result. A labelled teleop video remains a fallback.
+
+## R4 review fixes (latest #60)
+
+The confirmed no-reply bug is fixed: the Uno R4 UART reports zero available TX
+space even though writes work. The tests now run production `main.cpp`, not a
+separate loop implementation. Flashing is still a person-run action.
+
+After rebuilding/flashing with the actual verified settings, run `base.link`
+again. It now checks firmware identity/capabilities and the generated-config
+fingerprint, cancels partial serial input safely and acknowledges STOP. An old
+firmware or a mismatched header fails before driving with a specific error.
+The host requests an exclusive port lock; still close Serial Monitor and other
+serial apps, since other programs may not honor advisory locks.
+
+`base.jog` now prints fresh before/after commanded steps and their estimated
+wheel distance. It explicitly reports physical direction/E-stop as unverified.
+Observe direction, loaded movement and the physical switch yourself; emitted
+steps cannot reveal a stalled wheel or wheel slip. If estop_sensed is false,
+STAT estop=0 cannot establish that the E-stop works.
+
+New missions refuse to drive unless the arm is at taught ready (within 5 degrees
+on each unfrozen arm joint), after any prior pick worker has stopped. Return it
+safely yourself if it is extended; the mission does not auto-retract it. A phone
+outside the calibrated area fails immediately. During approach, no improvement
+of at least 5 mm in calibrated target error for 10 seconds stops the base with
+a traction/obstruction message. This also needs a live camera/floor check.
+
+SW1's fix preserving suction poses during claw re-teaching and the checked
+`docs/demo-runbook.md` are merged into this candidate. Phone remains the only
+autonomous item. The existing travel limit counts turns, and reaching it still
+stops rather than silently extending the budget.

@@ -27,7 +27,9 @@ def jog(driver, config, direction, speed, duration, distance_mm):
     validate(config, direction, speed, duration, distance_mm)
     try:
         driver.status(timeout=3)
-        driver.stop_and_wait()
+        driver.synchronize()
+        info = driver.verify_firmware(config['base'], require_ready=not isinstance(driver.port, FakeSerial))
+        before = driver.fresh_status(after=time.monotonic())
         driver.set_travel_limit(distance_mm)
         started = time.monotonic()
         left, right = DIRECTIONS[direction]
@@ -36,7 +38,13 @@ def jog(driver, config, direction, speed, duration, distance_mm):
             time.sleep(min(.05, max(0, duration - (time.monotonic() - started))))
     finally:
         driver.stop_and_wait()  # Also on Ctrl-C, timeout, error or an exhausted budget.
+    after = driver.fresh_status(after=time.monotonic())
+    steps = dict(left=after.left_steps-before.left_steps, right=after.right_steps-before.right_steps)
+    mm_per_step = math.pi * config['base']['wheel_diameter_mm'] / config['base']['half_steps_per_rev']
     return dict(direction=direction, speed_mm_s=speed, max_seconds=duration,
+                firmware=info, commanded_steps=steps,
+                estimated_wheel_mm={key: value * mm_per_step for key, value in steps.items()},
+                physical_direction_verified=False, physical_estop_verified=False,
                 max_wheel_travel_mm=distance_mm, limit_reached=driver.limit_reached,
                 stop_acknowledged=True, note='Observe actual direction; this does not certify traction or E-stop.')
 
@@ -69,9 +77,11 @@ def main(argv=None):
         if input('Press Enter to run this one test, or type anything to cancel: '):
             return 1
         import serial
-        port = serial.Serial(args.port, baudrate=config['base']['baud'], timeout=.05, write_timeout=.1)
+        port = serial.Serial(args.port, baudrate=config['base']['baud'], timeout=.05, write_timeout=.1, exclusive=True)
     else:
-        port = FakeSerial(max_speed_mm_s=config['base']['max_speed_mm_s'])
+        port = FakeSerial(max_speed_mm_s=config['base']['max_speed_mm_s'], config=config['base'],
+                          wheel_diameter_mm=config['base']['wheel_diameter_mm'],
+                          steps_per_rev=config['base']['half_steps_per_rev'])
     try:
         with BaseDriver(port, max_speed_mm_s=config['base']['max_speed_mm_s'], max_lift_mm=1000, timeout=1) as driver:
             result = jog(driver, config, args.direction, args.speed, args.seconds, args.distance_mm)

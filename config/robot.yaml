@@ -61,6 +61,7 @@ navigation:                         # Draft B5/B6 settings; physical acceptance 
   detection_max_age_s: 0.3
   settle_frames: 3
   approach_timeout_s: 120
+  approach_progress_timeout_s: 10     # Stop if calibrated target error does not improve by 5 mm.
   approach_speed_mm_s: 20
   linear_gain: 0.8
   angular_gain: 1.5
