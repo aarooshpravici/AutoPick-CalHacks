@@ -40,7 +40,7 @@ This runbook comes after HIGH-PRIORITY.md H1–H7. If H7 (one clean end-to-end r
 - [ ] SW1's checkout is on the branch SW2 chose in H2: `main` after the merge, `task/HP-software` (#60) or `integration/demo`.
   - Check it out **before** editing `robot.yaml`.
   - Don't `git pull` again until the video is done.
-  - The local files stay: `config/poses.json`, `config/floor_homography.json` and `data/models/phone_v2.pt`.
+  - The local files stay: `config/poses.json`, `config/floor_homography.json` and `data/models/phone_sock_v3.pt` (release `detector-v3`).
 - [ ] `config/robot.yaml` holds the measured values. `ui.server --real` refuses to start until `base.serial_port`, the two `base` flags and the parking spot (matching `config/floor_homography.json`) are set; with #60 it also refuses if `wrist_roll` isn't frozen. It can't check the rest:
   - `base.serial_port`: the R4's port, not an arm port;
   - `base.invert_left` / `invert_right`, as found in H3;
@@ -294,7 +294,7 @@ Nothing in this runbook was run on hardware. The commands come from the code on 
   - To fix: install them from `perception/requirements.txt`, then check that a RealSense frame still comes through (the S4 check).
   - Whether `--device mps` works in that environment is unknown.
 - **Missing on SW1's Mac:**
-  - the weights `data/models/phone_v2.pt` (on SW2's Mac);
+  - the weights `data/models/phone_sock_v3.pt` (release `detector-v3`; on SW2's Mac);
   - `config/floor_homography.json`.
 - **SW1's checkout is on `task/A13-teleop`.** Its `robot.yaml` has no `navigation` section and still has the old base values.
 - **PlatformIO isn't installed on SW1's Mac:** flash the R4 from SW2's Mac, or install PlatformIO first.

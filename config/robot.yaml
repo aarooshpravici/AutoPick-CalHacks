@@ -38,7 +38,7 @@ base:
   acceleration_mm_s2: 30
   stop_acceleration_mm_s2: 300
 perception:
-  detector_weights: data/models/phone_v2.pt  # Local file; never committed.
+  detector_weights: data/models/phone_sock_v3.pt  # Release detector-v3 (0 phone, 1 sock); local file, never committed.
   detector_conf: 0.5
   detections_udp: 127.0.0.1:5601
   hand_udp: 127.0.0.1:5602
@@ -55,7 +55,7 @@ lift:
   seated_hand_mm: 700
   standing_hand_mm: 1000
   taken_weight_drop_g: 50
-items: [phone]                        # stretch: glasses, pill_bottle, remote, pen, sock
+items: [phone, sock]                  # sock needs phone_sock_v3.pt; stretch: glasses, pill_bottle, remote, pen
 navigation:                         # Draft B5/B6 settings; physical acceptance pending.
   pickup_max_distance_m: 0.33        # Provisional camera-floor reference; verify on final base.
   detection_max_age_s: 0.3

@@ -654,7 +654,7 @@ def test_main_modes_are_exclusive_and_help_works(capsys):
     assert "--real" in capsys.readouterr().out
 
 
-def test_object_dropdown_contains_selectable_phone():
+def test_object_dropdown_contains_selectable_phone_and_sock():
     from html.parser import HTMLParser
     from ui.server import PAGE
 
@@ -673,4 +673,4 @@ def test_object_dropdown_contains_selectable_phone():
 
     parser = Options()
     parser.feed(PAGE)
-    assert parser.values == ['', 'phone']
+    assert parser.values == ['', 'phone', 'sock']

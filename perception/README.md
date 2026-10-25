@@ -221,7 +221,7 @@ REQ-codex-6; physical acceptance and the pickup target remain pending.
 
 ### Phone, remote and sock model (issue #47)
 
-The active checkpoint is still phone-only. No sock/remote training is claimed.
+The active checkpoint is `phone_sock_v3.pt` from GitHub release `detector-v3` (classes `0: phone`, `1: sock`; SHA-256 `cd916cf9…a4ad`). Its validation photos share sessions with training, and the live 9/10 placement check has not been run for either class. No remote training is claimed.
 Collect at least 100 training images each of a remote and 2–3 different socks,
 plus a separate validation capture session, using the final connected D435 mount.
 Include several floor textures, object orientations, ranges and empty-floor images.
