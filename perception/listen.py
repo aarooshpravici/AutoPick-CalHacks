@@ -10,11 +10,11 @@ from perception.publish import address
 from perception.realsense import ROOT
 
 
-def summary(messages, elapsed, placement):
-    phones = [max((item for item in message["items"] if item["label"] == "phone"),
+def summary(messages, elapsed, placement, label="phone"):
+    phones = [max((item for item in message["items"] if item["label"] == label),
                   key=lambda item: item["conf"], default=None) for message in messages]
     seen = [item for item in phones if item is not None]
-    return dict(placement=placement, frames=len(messages), detected_frames=len(seen),
+    return dict(label=label, placement=placement, frames=len(messages), detected_frames=len(seen),
                 detected=bool(seen), hz=len(messages) / elapsed if elapsed else 0,
                 max_conf=max((item["conf"] for item in seen), default=None),
                 mean_pixel_height=(sum(item["bbox_px"][3] - item["bbox_px"][1] for item in seen)
@@ -26,6 +26,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=ROOT / "config/robot.yaml")
     parser.add_argument("--placement", required=True, help="e.g. 0.75m-left or empty")
+    parser.add_argument("--label", choices=["phone", "remote", "sock"], default="phone")
     parser.add_argument("--seconds", type=float, default=5)
     parser.add_argument("--output", type=Path, default=ROOT / "data/logs/p3-live.jsonl")
     args = parser.parse_args(argv)
@@ -47,7 +48,7 @@ def main(argv=None):
             messages.append(message)
             log.write(json.dumps(dict(placement=args.placement, message=message)) + "\n")
             print(json.dumps(message), flush=True)
-        result = summary(messages, time.monotonic() - start, args.placement)
+        result = summary(messages, time.monotonic() - start, args.placement, args.label)
         result["recorded_at"] = datetime.now().isoformat()
         log.write(json.dumps(dict(summary=result)) + "\n")
         print("SUMMARY " + json.dumps(result), flush=True)

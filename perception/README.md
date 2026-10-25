@@ -218,3 +218,30 @@ Do not commit measured calibration, photos or logs. Archive them under ignored
 `data/calibration/` for transfer to the robot Mac. Any camera movement invalidates
 P4 even if resolution/flip are unchanged. P4 schema approval is requested in
 REQ-codex-6; physical acceptance and the pickup target remain pending.
+
+### Phone, remote and sock model (issue #47)
+
+The active checkpoint is still phone-only. No sock/remote training is claimed.
+Collect at least 100 training images each of a remote and 2–3 different socks,
+plus a separate validation capture session, using the final connected D435 mount.
+Include several floor textures, object orientations, ranges and empty-floor images.
+Label tight boxes in class order `phone: 0`, `remote: 1`, `sock: 2`. Remap imported
+labels to this order. Use `images/train`, `images/val`, matching `labels` folders,
+and explicit empty label files for negatives. Keep adjacent burst frames in the
+same split; the audit catches exact duplicates, not near-duplicate images.
+
+Create a local dataset YAML with `path`, `train: images/train`, `val: images/val`
+and `names: [phone, remote, sock]`, then run from the repository root:
+
+```sh
+.venv/perception/bin/python -m perception.dataset data/datasets/objects/data.yaml
+.venv/perception/bin/python -m perception.dataset data/datasets/objects/data.yaml --train
+```
+
+Training refuses missing classes, invalid boxes, exact train/validation leakage,
+insufficient remote/sock training images and an existing run name. It writes a new
+`data/runs/objects_v1` checkpoint and leaves the phone checkpoint active. Review
+held-out per-class results and run the placement table for every class before
+changing `perception.detector_weights` or enabling extra `items` in robot.yaml.
+Use `perception.listen --label sock --placement 0.5m-left` (or `remote`) for those
+checks; retain separate empty-floor trials. Do not commit photos or checkpoints.
