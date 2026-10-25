@@ -38,6 +38,11 @@ Build without uploading:
 .venv/platformio/bin/pio run -d base/firmware
 ```
 
+The Apple Silicon build uses pinned GCC ARM 14.2.1 because the platform's default
+GCC package is Intel-only. Arduino core 1.6.0 has a TinyUSB void-return diagnostic;
+`-Wno-error=return-mismatch` retains it as a warning. The board build succeeds
+(3328 bytes RAM, 45092 bytes flash); this is compile evidence, not bench acceptance.
+
 PlatformIO Core 6.1.18; pinned `renesas-ra@1.9.0`, board `uno_r4_wifi`:
 https://docs.platformio.org/en/latest/boards/renesas-ra/uno_r4_wifi.html
 
