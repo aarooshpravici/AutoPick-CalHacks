@@ -31,12 +31,15 @@ base:
   right_coil_pins: [2, 3, 4, 5]
   invert_left: false                 # Verify direction with wheels raised.
   invert_right: false
+  drive_calibrated: false           # Requires measured loaded speed, direction and turning.
   wiring_confirmed: false            # Set only after HW1 wiring/power check.
   estop_sense_pin: -1                # No sense wire specified; physical E-stop still required.
   max_speed_mm_s: 30                 # PROVISIONAL; replace after loaded speed/turn measurement.
   acceleration_mm_s2: 30
   stop_acceleration_mm_s2: 300
 perception:
+  detector_weights: data/models/phone_v2.pt  # Local file; never committed.
+  detector_conf: 0.5
   detections_udp: 127.0.0.1:5601
   hand_udp: 127.0.0.1:5602
   # Floor origin: directly below front camera; x forward, y left, metres.
