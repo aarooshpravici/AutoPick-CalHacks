@@ -8,7 +8,7 @@
 | Route           | Does                                                              |
 |-----------------|-------------------------------------------------------------------|
 | GET  /          | The page: text box, big STOP button, current state, thumbnails    |
-| POST /request   | {"text": "...", "hand": "seated"|"standing"}: parsed, sent on     |
+| POST /request   | {"text": "...", "hand": "standing"|"seated"}: parsed, sent on     |
 |                 | + "clarify": true, "dialog": [{"question", "answer"}], hand ""   |
 |                 | allowed: may answer {"parsed": {"action": "ask", ...}} instead    |
 | POST /stop      | Stop everything                                                   |
@@ -125,7 +125,7 @@ class Turn(BaseModel):
 
 class RequestBody(BaseModel):
     text: str
-    hand: Any = "seated"      # checked by hand after the STOP check, so "stop" always wins
+    hand: Any = "standing"    # checked by hand after the STOP check, so "stop" always wins
     clarify: bool = False     # True: the robot may ask questions first; hand may then be "" or None
     dialog: list[Turn] = []   # questions already asked for this request and the answers, oldest first
 
@@ -238,7 +238,7 @@ class FakeBrain:
         self._lock = threading.Lock()
         self._state = "Idle"
         self._item = None
-        self._hand = "seated"
+        self._hand = "standing"
         self._started = None
         self._last_pick = None
         self._message = "Ready"
@@ -377,7 +377,7 @@ PAGE = """<!doctype html>
   <section class="card">
     <form id="ask">
       <input id="text" autocomplete="off" placeholder="I dropped my phone">
-      <select id="hand" aria-label="Hand height"><option value="">Ask me</option><option value="seated">Seated</option><option value="standing">Standing</option></select>
+      <select id="hand" aria-label="Hand height"><option value="standing" selected>Standing</option><option value="seated">Seated</option><option value="">Ask me</option></select>
       <button class="go" id="go" type="submit" aria-disabled="false">Ask</button>
     </form>
     <label id="setting"><input type="checkbox" id="clarify" checked> Ask me questions first</label>
@@ -454,7 +454,8 @@ $("cancel").addEventListener("click", () => { endConversation(); $("reply").text
 // The "Ask me questions first" setting; the page works without localStorage.
 let handTouched = false;
 try { const v = localStorage.getItem("clarify"); if (v !== null) $("clarify").checked = v === "1"; } catch (e) {}
-const syncHand = () => { if (!handTouched) $("hand").value = $("clarify").checked ? "" : "seated"; };
+// Standing by default, even for someone seated: the phone is easier to take held a little high.
+const syncHand = () => { if (!handTouched) $("hand").value = "standing"; };
 syncHand();
 $("hand").addEventListener("change", () => { handTouched = true; });
 $("clarify").addEventListener("change", () => {
@@ -505,7 +506,7 @@ async function send(raw) {
                          : {text, dialog: []};
   const hand = $("hand").value;
   const payload = clarify ? {text: sent.text, hand, clarify: true, dialog: sent.dialog}
-                          : {text: sent.text, hand: hand || "seated"};
+                          : {text: sent.text, hand: hand || "standing"};
   asking = true; setAskBusy(); $("reply").textContent = "…";
   try {
     const r = await call("/request", {method: "POST", headers: {"Content-Type": "application/json"},

@@ -338,7 +338,7 @@ def test_stop_racing_brain_request_still_wins():
         brain.release.set()
         t.join(10)
         assert result["value"].json()["dropped"] == "stopped"
-        assert brain.calls[-2:] == [("request", "pen", "seated"), ("stop",)]
+        assert brain.calls[-2:] == [("request", "pen", "standing"), ("stop",)]
         assert c.get("/status").json()["state"] == "Stopped"
 
 
@@ -530,7 +530,7 @@ def test_page_uses_the_parsers_stop_words():
     "typing_an_answer_posts_it_as_the_answer_to_the_question",
     "stop_clears_the_conversation",
     "cancel_clears_the_conversation_without_stopping",
-    "clarify_setting_off_sends_no_dialog_and_hand_seated",
+    "clarify_setting_off_sends_no_dialog_and_hand_standing",
 ])
 def test_page_script(tmp_path, scenario):
     script = tmp_path / "page.js"

@@ -362,7 +362,7 @@ def test_clarify_fetch_with_unknown_hand_asks_the_hand_question():
 
 def test_clarify_unknown_hand_with_no_questions_left_uses_the_default():
     r = clarify_request("my phone", _turns(4), None, ITEMS, client=CannedClient(_said("fetch", "phone")))
-    assert (r["action"], r["item"], r["hand"]) == ("fetch", "phone", "seated")
+    assert (r["action"], r["item"], r["hand"]) == ("fetch", "phone", "standing")
 
 
 def test_clarify_given_hand_overrides_the_models():
@@ -457,7 +457,7 @@ def test_clarify_keywords_give_up_after_four_unhelpful_answers():
     assert r == {"action": "none", "item": None, "hand": None, "question": None, "options": []}
     assert clarify_request("I dropped something", _turns(3), None, ITEMS, use_api=False)["action"] == "ask"
     r = clarify_request("my phone", _turns(4), None, ITEMS, use_api=False)    # no hand and no questions left
-    assert (r["action"], r["hand"]) == ("fetch", "seated")
+    assert (r["action"], r["hand"]) == ("fetch", "standing")
 
 
 def test_clarify_network_off_falls_back_to_keywords(caplog):
