@@ -49,7 +49,7 @@ def scripted(leader, follower, poses=DEFAULT_POSES, with_tray=False):
 
 
 def assert_matches_default(taught, with_tray=False):
-    names = [name for name in poses_mod.POSE_NAMES if name in taught]
+    names = [name for name in poses_mod.POSE_NAMES if name in taught and name not in poses_mod.SUCTION_POSES]
     assert names == ["ready", "above_object", "at_object", "lift", "present"] + (["above_tray"] if with_tray else [])
     for name in names:
         for j in poses_mod.JOINTS:
@@ -735,6 +735,30 @@ def test_cli_suction_dry_run_merges_into_an_existing_out_file(tmp_path, capsys, 
     merged = poses_mod.load(target, "hand")
     assert merged["ready"]["shoulder_pan"] == 9.0               # kept, not retaught
     assert set(SUCTION_NAMES) <= set(merged)
+
+
+def test_cli_claw_reteach_keeps_the_suction_poses_already_in_the_file(tmp_path, capsys, default_poses_path,
+                                                                     scratch_tmp):
+    """Review finding: a claw re-teach used to rewrite the file with the claw poses only."""
+    target = tmp_path / "taught.json"
+    assert teach_mod.main(["--dry-run", "--out", str(target), "--config", str(write_config(tmp_path))]) == 0
+    assert teach_mod.main(["--dry-run", "--grasp", "suction", "--out", str(target),
+                           "--config", str(write_config(tmp_path))]) == 0
+    suction_before = {k: v for k, v in poses_mod.load_partial(target).items() if k in SUCTION_NAMES}
+    assert set(suction_before) == set(SUCTION_NAMES)
+    capsys.readouterr()
+    assert teach_mod.main(["--dry-run", "--out", str(target), "--config", str(write_config(tmp_path))]) == 0
+    assert "kept the suction poses" in capsys.readouterr().out
+    after = poses_mod.load(target, "suction")
+    assert {k: after[k] for k in SUCTION_NAMES} == suction_before
+    poses_mod.load(target, "hand")                              # the claw poses are all there too
+
+
+def test_cli_claw_reteach_over_an_unreadable_file_still_saves(tmp_path, capsys, scratch_tmp):
+    target = tmp_path / "taught.json"
+    target.write_text("{not json")
+    assert teach_mod.main(["--dry-run", "--out", str(target), "--config", str(write_config(tmp_path))]) == 0
+    poses_mod.load(target, "hand")
 
 
 def test_cli_suction_with_tray_is_an_error(tmp_path, capsys, scratch_tmp):
