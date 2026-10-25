@@ -15,6 +15,7 @@ from arm.pick import pick_to_hand
 from arm.sim import SimArm, DEFAULT_POSES
 from base.driver import BaseDriver, FakeSerial
 from brain.detections import FakeDetections, ReplayDetections, UdpDetections, validate
+from perception.publish import address
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -34,6 +35,26 @@ def grasp_settings(config):
                 raise ValueError(f"handoff.{key} must be positive and at most {maximum} seconds")
             options[key] = value
     return grasp, options
+
+
+CAMERA_RESUME_GRACE_S = 8   # after the arm cameras close, before Search counts the camera as lost
+
+
+def arm_policy_settings(config):
+    """The ACT checkpoint run after the manual arm-camera switch (A14), or None.
+
+    With a policy the mission parks, then waits in ArmCamera until the person presses
+    "Switch to arm camera": the colour detector releases the RealSense and the policy
+    opens it as the grey IR webcam its demos were recorded with."""
+    path = config.get("handoff", {}).get("arm_policy")
+    if path is None:
+        return None
+    if not isinstance(path, str) or not path:
+        raise ValueError("handoff.arm_policy must be a checkpoint folder path or null")
+    if config["handoff"].get("grasp", "claw") != "claw":
+        raise ValueError("handoff.arm_policy needs grasp: claw (suction takes no policy)")
+    address(config["perception"].get("control_udp", ""))   # raises on a bad host:port
+    return path
 
 
 def handoff_timeout(config):
@@ -62,8 +83,14 @@ class SimNavigation:
 class Mission:
     def __init__(self, config, *, base, arm, source, poses=DEFAULT_POSES,
                  navigator_factory=SimNavigation, pick=pick_to_hand, log_dir=None,
-                 period=.1, simulated=True):
+                 period=.1, simulated=True, arm_camera=None):
         self.grasp, self.pick_options = grasp_settings(config)
+        self.arm_policy = arm_policy_settings(config)
+        if self.arm_policy and arm_camera is None:
+            from brain.arm_camera import ArmCamera, SimArmCamera
+            arm_camera = SimArmCamera() if simulated else ArmCamera(config)
+        self.arm_camera = arm_camera if self.arm_policy else None
+        self._arm_go = False
         self.config, self.base, self.arm, self.source = config, base, arm, source
         self.poses, self.pick, self.navigator_factory = poses, pick, navigator_factory
         self.period = period
@@ -165,6 +192,7 @@ class Mission:
             self._last_camera = self._last_seen = time.monotonic()
             self._navigator = self.navigator_factory()
             self._parking_stop_ticket = None
+            self._arm_go = False
             self._halt()
             self._state_to("Search", f"Looking for: {item}")
             self._event("request", item=item, hand=hand)
@@ -173,12 +201,21 @@ class Mission:
         with self._lock:
             self._token.set()
             self._generation += 1
+            self._arm_go = False
             self._halt()
             self._state_to("Stopped", "Stopped; arm holding")
             self._event("stop")
             error = self._io_error
         if error:
             raise RuntimeError(f"STOP FAILED: {error}")
+
+    def arm_camera_go(self):
+        """The page's "Switch to arm camera" button: valid only while parked in ArmCamera."""
+        with self._lock:
+            if self._state != "ArmCamera":
+                raise RuntimeError("not parked and waiting for the arm camera")
+            self._arm_go = True
+            self._event("arm_camera_go")
 
     def status(self):
         with self._lock:
@@ -289,19 +326,34 @@ class Mission:
                 if generation == self._generation and not token.is_set():
                     self._state_to({"pick": "Pick", "present": "Present", "wait_for_take": "WaitForTake"}[state],
                                    {"pick": "Picking up", "present": "Presenting", "wait_for_take": "Please take the item"}[state])
+        options = dict(self.pick_options)
+        camera_notes = []
         try:
+            if self.arm_camera is not None:
+                policy = self.arm_camera.open(log=lambda message: self._event("arm", message=message))
+                if policy is not None:
+                    options["policy"] = policy
             result = self.pick(self.arm, self.poses,
                                speed_deg_s=(self.config["arm"]["move_speed_deg_s"] if self.simulated else
                                             min(25, self.config["arm"]["move_speed_deg_s"])),
                                handoff_timeout_s=self.config["handoff"]["timeout_s"],
                                handoff_grip=self.config["handoff"].get("grip", "squeeze"),
                                stop_event=token, on_state=on_state,
-                               log=lambda message: self._event("arm", message=message), **self.pick_options)
+                               log=lambda message: self._event("arm", message=message), **options)
             if self.grasp == "suction" and result.get("result") == "taken":
                 result = dict(result, result="unverified", take_verified=False)
                 result["detail"] = "Timed suction sequence finished; seal and take were not sensed. " + result.get("detail", "")
         except Exception as error:
-            result = dict(result="stuck", detail=str(error), grasp="scripted", attempts=0, seconds=0)
+            result = dict(result="stuck", detail=str(error), grasp="policy" if self.arm_camera else "scripted",
+                          attempts=0, seconds=0)
+        finally:
+            if self.arm_camera is not None:
+                try:
+                    camera_notes = self.arm_camera.close()
+                except Exception as error:  # the result must still be reported
+                    camera_notes = [f"arm camera close failed: {error}"]
+        if camera_notes:
+            result = dict(result, camera_notes=camera_notes)
         with self._lock:
             self._result = generation, result
         self._event("pick_result", generation=generation, result=result)
@@ -343,6 +395,8 @@ class Mission:
                         self._seen = 0
                         self._navigator = self.navigator_factory()
                         self._parking_stop_ticket = None
+                        if self.arm_camera is not None:   # the colour detector needs a few seconds to reopen
+                            self._last_camera = time.monotonic() + CAMERA_RESUME_GRACE_S
                         self._state_to("Search", "Dropped; searching again")
                     elif result["result"] == "stopped":
                         self._token.set(); self._halt()
@@ -420,14 +474,18 @@ class Mission:
                             self._halt()
                             self._parking_stop_ticket = self._stop_ticket
                         elif self._stop_completed >= self._parking_stop_ticket:
-                            self._attempts += 1
-                            self._state_to("Pick", "Picking up")
-                            self._arm_epoch += 1
-                            self._ready_at = None
-                            start_pick = self._generation, self._token
+                            if self.arm_camera is not None:
+                                self._arm_go = False
+                                self._state_to("ArmCamera", "Parked. Press Switch to arm camera to start the arm")
+                            else:
+                                start_pick = self._begin_pick()
                     else:
                         self._parking_stop_ticket = None  # Any renewed approach needs a new stopped acknowledgment.
                         self._drive(speeds)
+            elif self._state == "ArmCamera" and self._arm_go:
+                # Base stays stopped: ArmCamera never drives, and STOP was acknowledged on parking.
+                self._arm_go = False
+                start_pick = self._begin_pick()
             elif self._state == "Failed" and not self._io_error and now - self._failed_at > 1:
                 self._state_to("Idle", self._message)
         if start_pick:
@@ -435,6 +493,14 @@ class Mission:
             self._pick_thread = threading.Thread(target=self._start_pick, args=start_pick,
                                                  daemon=True, name="mission-pick")
             self._pick_thread.start()
+
+    def _begin_pick(self):
+        """Caller holds the lock, after the parking STOP acknowledgment."""
+        self._attempts += 1
+        self._state_to("Pick", "Switching to the arm camera" if self.arm_camera else "Picking up")
+        self._arm_epoch += 1
+        self._ready_at = None
+        return self._generation, self._token
 
     def _run(self):
         while not self._closed.is_set():
@@ -472,7 +538,7 @@ def build(config, sim):
     cfg = config["base"]
     base = BaseDriver(FakeSerial(max_speed_mm_s=cfg["max_speed_mm_s"]),
                       max_speed_mm_s=cfg["max_speed_mm_s"], max_lift_mm=1000)
-    return Mission(config, base=base, arm=SimArm(), source=FakeDetections())
+    return Mission(config, base=base, arm=SimArm(), source=FakeDetections(labels=config["items"]))
 
 
 def build_real(config):
@@ -481,6 +547,14 @@ def build_real(config):
     from perception.floor import FloorMap
     from brain.navigation import RealNavigation
     grasp, _ = grasp_settings(config)
+    policy = arm_policy_settings(config)
+    if policy is not None:
+        from arm.pick import load_camera_indices
+        from arm.policy import checkpoint_image_sizes
+        folder = Path(policy) if Path(policy).is_absolute() else ROOT / policy
+        if not (folder / "config.json").is_file():
+            raise RuntimeError(f"handoff.arm_policy has no checkpoint config.json: {folder}")
+        load_camera_indices(ROOT / "config/robot.yaml", list(checkpoint_image_sizes(folder)))
     handoff_timeout(config)
     cfg = config["base"]
     if cfg.get("wiring_confirmed") is not True or cfg.get("drive_calibrated") is not True:
