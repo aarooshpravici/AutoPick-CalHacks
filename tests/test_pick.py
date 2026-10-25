@@ -540,8 +540,10 @@ def hand(arm, **kwargs):
 
 
 def where(arm):
-    """The DEFAULT_POSES pose the arm is at (within the arrival tolerance), or None."""
+    """The DEFAULT_POSES claw pose the arm is at (within the arrival tolerance), or None."""
     for name in poses_mod.POSE_NAMES:
+        if name in poses_mod.SUCTION_POSES:
+            continue
         if all(abs(arm.pos[j] - DEFAULT_POSES[name][j]) <= pick.TOLERANCE_DEG[j] for j in poses_mod.ARM_JOINTS):
             return name
     return None

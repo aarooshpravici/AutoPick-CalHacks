@@ -474,21 +474,84 @@ def test_cli_interrupt_while_teaching_closes_both_and_saves_nothing(tmp_path, ca
     assert default_poses_path.read_bytes() == before
 
 
-def test_cli_invalid_poses_are_not_saved(tmp_path, capsys, monkeypatch, fake_hardware, default_poses_path):
-    """The claw open and closed steps taught at the same value: refused, nothing written."""
-    before = default_poses_path.read_bytes()
-    poses = json.loads(json.dumps(DEFAULT_POSES))
-    poses["gripper_closed"] = poses["gripper_open"] - 3
+def test_cli_bad_claw_steps_are_asked_again_and_the_session_is_kept(tmp_path, capsys, monkeypatch,
+                                                                    fake_hardware, default_poses_path):
+    """The claw open step taught nearly closed: both claw steps are asked again, nothing is
+    thrown away, and the good second try is saved."""
+    bad = json.loads(json.dumps(DEFAULT_POSES))
+    bad["gripper_open"] = bad["gripper_closed"] + 3
+    asked = []
 
     def person(step, prompt):
-        if not hasattr(fake_hardware, "script"):
-            fake_hardware.script = scripted(fake_hardware.leader, fake_hardware.follower, poses)
-        return fake_hardware.script(step, prompt)
+        asked.append(step)
+        if not hasattr(fake_hardware, "first"):
+            fake_hardware.first = scripted(fake_hardware.leader, fake_hardware.follower, bad)
+            fake_hardware.again = scripted(fake_hardware.leader, fake_hardware.follower)
+        return (fake_hardware.again if asked.count(step) > 1 else fake_hardware.first)(step, prompt)
 
     monkeypatch.setattr(teach_mod, "enter_waiter", person)
     rc = teach_mod.main(["--config", str(write_config(tmp_path))])
-    assert rc == 1 and "less than 10 apart" in capsys.readouterr().err
-    assert default_poses_path.read_bytes() == before
+    out = capsys.readouterr().out
+    assert rc == 0 and "Teach both claw steps again" in out
+    assert asked[-4:] == ["gripper_open", "gripper_closed", "gripper_open", "gripper_closed"]
+    assert asked.count("ready") == 1                # the arm poses weren't taught again
+    assert_matches_default(poses_mod.load(default_poses_path))
+
+
+def test_a_claw_gap_too_small_asks_both_claw_steps_again():
+    leader, follower = SimLeader(), SimArm()
+    bad = json.loads(json.dumps(DEFAULT_POSES))
+    bad["gripper_closed"] = bad["gripper_open"] - 4     # "closed" taught barely closed
+    first, again = scripted(leader, follower, bad), scripted(leader, follower)
+    asked, logs = [], []
+
+    def wait_for(step, prompt):
+        asked.append(step)
+        return (again if asked.count(step) > 1 else first)(step, prompt)
+
+    taught = teach(leader, follower, speed_deg_s=45, wait_for=wait_for, log=logs.append)
+    assert asked == ["ready", "above_object", "at_object", "lift", "present",
+                     "gripper_open", "gripper_closed", "gripper_open", "gripper_closed"]
+    assert any("less than 10 apart" in m for m in logs)
+    assert_matches_default(taught)
+
+
+def clamp_warning(**joints):
+    """LeRobot's step-cap warning, worded as lerobot/robots/utils.py logs it."""
+    from pprint import pformat
+    return ("Relative goal position magnitude had to be clamped to be safe.\n"
+            + pformat({j: {"original goal_pos": v, "safe goal_pos": v / 2} for j, v in joints.items()}, indent=4))
+
+
+def test_claw_clamp_warning_is_muted_only_while_teaching(caplog):
+    lerobot_log = __import__("logging").getLogger(teach_mod.CLAMP_LOGGER)
+
+    class Warns(SimArm):
+        def command(self, targets):
+            lerobot_log.warning(clamp_warning(gripper=95.0))
+            lerobot_log.warning(clamp_warning(elbow_flex=40.0))
+            super().command(targets)
+
+    leader, follower = SimLeader(), Warns()
+    with caplog.at_level("WARNING", logger=teach_mod.CLAMP_LOGGER):
+        teach(leader, follower, speed_deg_s=45, wait_for=scripted(leader, follower), log=QUIET)
+        during = [r.getMessage() for r in caplog.records]
+        caplog.clear()
+        lerobot_log.warning(clamp_warning(gripper=95.0))
+    assert during and all("'elbow_flex'" in m for m in during)     # an arm joint clamped still shows
+    assert len(caplog.records) == 1                                 # muted only while teaching
+    assert lerobot_log.filters == []
+
+
+@pytest.mark.parametrize("message, shown", [
+    (clamp_warning(gripper=95.0), False),
+    (clamp_warning(gripper=95.0, wrist_flex=30.0), True),
+    (clamp_warning(shoulder_lift=30.0), True),
+    ("some other LeRobot warning about 'gripper'", True)])
+def test_quiet_claw_clamp_filter(message, shown):
+    import logging
+    record = logging.LogRecord(teach_mod.CLAMP_LOGGER, logging.WARNING, __file__, 1, message, None, None)
+    assert teach_mod._QuietClawClamp().filter(record) is shown
 
 
 def test_cli_help_needs_no_config(capsys):
@@ -496,3 +559,229 @@ def test_cli_help_needs_no_config(capsys):
         teach_mod.main(["--help"])
     assert exc.value.code == 0
     assert "--dry-run" in capsys.readouterr().out
+
+
+# --- C5: --grasp suction teaches the suction cup's poses ---------------------------
+
+SUCTION_NAMES = poses_mod.SUCTION_POSES
+
+
+def suction_scripted(leader, follower, with_ready=True, prompts=None):
+    """The scripted person for a suction teach; records each prompt it is shown in `prompts`."""
+    inner = scripted_waiter(leader, follower, dry_run_targets(DEFAULT_POSES, grasp="suction",
+                                                              with_ready=with_ready))
+
+    def wait_for(step, prompt):
+        if prompts is not None:
+            prompts.append(prompt)
+        return inner(step, prompt)
+
+    return wait_for
+
+
+def test_suction_steps_are_ready_then_the_four_suction_poses_and_no_claw_steps():
+    names = [name for name, _ in teach_steps(grasp="suction")]
+    assert names == ["ready", *SUCTION_NAMES]
+    assert [name for name, _ in teach_steps(grasp="suction", with_ready=False)] == SUCTION_NAMES
+    assert "gripper_open" not in names and "gripper_closed" not in names
+    assert [name for name, _ in teach_steps()] == [name for name, _ in STEPS]       # the claw teach is unchanged
+
+
+def test_suction_steps_have_prompts_that_say_what_to_do_with_the_cup_and_the_claw():
+    hints = dict(teach_mod.SUCTION_STEPS)
+    assert list(hints) == SUCTION_NAMES
+    assert all("cup" in hint for hint in hints.values())
+    assert "claw" in hints["suction_above"] and "claw" in hints["suction_press"]    # the claw stays put
+    assert "above" in hints["suction_above"] and "press" in hints["suction_press"]
+    assert "lift" not in hints["suction_press"] and "pulls" in hints["suction_present"]
+
+
+def test_suction_has_no_tray():
+    with pytest.raises(ValueError, match="tray"):
+        teach_steps(with_tray=True, grasp="suction")
+    leader, follower = SimLeader(), SimArm()
+    with pytest.raises(ValueError, match="tray"):
+        teach(leader, follower, 45, wait_for=suction_scripted(leader, follower), log=QUIET,
+              with_tray=True, grasp="suction")
+
+
+def test_an_unknown_grasp_is_refused_before_the_follower_moves():
+    follower = SimArm()
+    with pytest.raises(ValueError, match="grasp"):
+        teach(SimLeader(), follower, 45, grasp="vacuum")
+    assert follower.goal == follower.pos
+
+
+def test_suction_teach_records_ready_and_the_four_poses_with_no_claw_values():
+    leader, follower = SimLeader(), SimArm()
+    prompts = []
+    taught = teach(leader, follower, 45, wait_for=suction_scripted(leader, follower, prompts=prompts),
+                   log=QUIET, grasp="suction")
+    assert [name for name in poses_mod.POSE_NAMES if name in taught] == ["ready", *SUCTION_NAMES]
+    assert "gripper_open" not in taught and "gripper_closed" not in taught
+    for name in ["ready", *SUCTION_NAMES]:
+        for j in poses_mod.JOINTS:
+            assert abs(taught[name][j] - DEFAULT_POSES[name][j]) < 0.5, (name, j)
+    poses_mod.validate(taught, "suction")
+    assert [p.split("]")[0] for p in prompts] == ["[ready", *[f"[{n}" for n in SUCTION_NAMES]]
+    assert all("Press Enter here when the follower is there" in p for p in prompts)
+
+
+def test_suction_teach_merges_into_the_existing_poses_and_keeps_their_ready():
+    base = json.loads(json.dumps({k: v for k, v in DEFAULT_POSES.items() if k not in SUCTION_NAMES}))
+    base["ready"]["shoulder_pan"] = 12.5            # marks it as the person's taught pose
+    base["ready"]["gripper"] = 33.0
+    leader, follower = SimLeader(base["ready"]), SimArm(base)
+    prompts = []
+    taught = teach(leader, follower, 45, wait_for=suction_scripted(leader, follower, with_ready=False,
+                                                                  prompts=prompts),
+                   log=QUIET, grasp="suction", base=base)
+    assert [p.split("]")[0] for p in prompts] == [f"[{n}" for n in SUCTION_NAMES]     # ready not asked
+    assert taught["ready"] == base["ready"]
+    for name in ("above_object", "at_object", "lift", "present", "gripper_open", "gripper_closed"):
+        assert taught[name] == base[name], name
+    assert abs(taught["suction_press"]["shoulder_lift"] - DEFAULT_POSES["suction_press"]["shoulder_lift"]) < 0.5
+    poses_mod.validate(taught, "hand")              # still a complete claw file
+    poses_mod.validate(taught, "suction")
+    assert base == json.loads(json.dumps(base))     # the caller's dict was not changed in place
+    assert not any(n in base for n in SUCTION_NAMES)
+
+
+def test_suction_teach_into_a_file_with_a_broken_claw_part_is_refused_not_saved():
+    base = {"ready": DEFAULT_POSES["ready"], "gripper_open": 50.0, "gripper_closed": 48.0}   # claw too close
+    leader, follower = SimLeader(), SimArm()
+    with pytest.raises(poses_mod.PosesError, match="less than"):
+        teach(leader, follower, 45, wait_for=suction_scripted(leader, follower, with_ready=False),
+              log=QUIET, grasp="suction", base=base)
+
+
+def test_taught_suction_poses_drive_a_clean_simulated_suction_pick(tmp_path):
+    leader, follower = SimLeader(), SimArm()
+    taught = teach(leader, follower, 45, wait_for=suction_scripted(leader, follower), log=QUIET, grasp="suction")
+    out = tmp_path / "poses.json"
+    save_with_backup(taught, out, "suction")
+    reloaded = poses_mod.load(out, "suction")
+    arm = SimArm(reloaded)
+    r = pick.pick_to_hand(arm, reloaded, grasp="suction")
+    assert (r["result"], arm.object) == ("taken", "hand")
+
+
+def test_a_suction_pose_not_moved_to_is_asked_again():
+    """The extra-Enter guard covers the suction poses too: press can't be where above already was."""
+    leader, follower = SimLeader(), SimArm()
+    targets = dry_run_targets(DEFAULT_POSES, grasp="suction")
+    targets["suction_press"] = dict(targets["suction_above"])
+    with pytest.raises(TeachError, match="suction_press"):
+        teach(leader, follower, 45, wait_for=scripted_waiter(leader, follower, targets), log=QUIET,
+              grasp="suction")
+
+
+def test_save_with_backup_in_suction_mode_keeps_the_claw_poses_and_backs_up(tmp_path, monkeypatch):
+    monkeypatch.setattr(teach_mod, "REPO_ROOT", tmp_path)
+    out = tmp_path / "poses.json"
+    claw = {k: v for k, v in DEFAULT_POSES.items() if k not in SUCTION_NAMES}
+    poses_mod.save(claw, out)
+    leader, follower = SimLeader(), SimArm()
+    taught = teach(leader, follower, 45, wait_for=suction_scripted(leader, follower, with_ready=False),
+                   log=QUIET, grasp="suction", base=poses_mod.load_partial(out))
+    backup = save_with_backup(taught, out, "suction")
+    assert backup is not None
+    assert set(json.loads(backup.read_text())) == {"units", *claw}        # the old file, claw poses only
+    both = poses_mod.load(out, "hand")
+    assert both["at_object"] == {j: float(claw["at_object"][j]) for j in poses_mod.JOINTS}
+    assert set(SUCTION_NAMES) <= set(both)
+
+
+# --- command line: --grasp suction -------------------------------------------------
+
+def test_cli_suction_dry_run_saves_ready_and_the_suction_poses_to_the_out_file(
+        tmp_path, capsys, default_poses_path, scratch_tmp):
+    before = default_poses_path.read_bytes()
+    target = tmp_path / "taught" / "poses.json"
+    rc = teach_mod.main(["--dry-run", "--grasp", "suction", "--out", str(target),
+                         "--config", str(write_config(tmp_path))])
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "teaching suction at" in out
+    saved = poses_mod.load(target, "suction")
+    assert [n for n in poses_mod.POSE_NAMES if n in saved] == ["ready", *SUCTION_NAMES]
+    assert "gripper_open" not in saved
+    assert default_poses_path.read_bytes() == before            # config/poses.json untouched
+    assert list(scratch_tmp.iterdir()) == []
+
+
+def test_cli_suction_dry_run_without_out_goes_to_a_scratch_folder(tmp_path, capsys, default_poses_path,
+                                                                  scratch_tmp):
+    before = default_poses_path.read_bytes()
+    rc = teach_mod.main(["--dry-run", "--grasp", "suction", "--config", str(write_config(tmp_path))])
+    assert rc == 0, capsys.readouterr()
+    written = list(scratch_tmp.glob("arm-teach-dry-run-*/poses.json"))
+    assert len(written) == 1
+    assert set(poses_mod.load(written[0], "suction")) >= {"ready", *SUCTION_NAMES}
+    assert default_poses_path.read_bytes() == before
+
+
+def test_cli_suction_dry_run_merges_into_an_existing_out_file(tmp_path, capsys, default_poses_path,
+                                                              scratch_tmp):
+    target = tmp_path / "taught.json"
+    claw = {k: v for k, v in DEFAULT_POSES.items() if k not in SUCTION_NAMES}
+    claw["ready"] = {**claw["ready"], "shoulder_pan": 9.0}
+    poses_mod.save(claw, target)
+    rc = teach_mod.main(["--dry-run", "--grasp", "suction", "--out", str(target),
+                         "--config", str(write_config(tmp_path))])
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "already has a ready pose" in out
+    merged = poses_mod.load(target, "hand")
+    assert merged["ready"]["shoulder_pan"] == 9.0               # kept, not retaught
+    assert set(SUCTION_NAMES) <= set(merged)
+
+
+def test_cli_suction_with_tray_is_an_error(tmp_path, capsys, scratch_tmp):
+    rc = teach_mod.main(["--dry-run", "--grasp", "suction", "--with-tray", "--config",
+                         str(write_config(tmp_path))])
+    assert rc == 1
+    assert "--with-tray does not apply" in capsys.readouterr().err
+    assert list(scratch_tmp.iterdir()) == []
+
+
+def test_cli_real_mode_suction_with_tray_opens_neither_arm(tmp_path, capsys, fake_hardware, default_poses_path):
+    before = default_poses_path.read_bytes()
+    rc = teach_mod.main(["--grasp", "suction", "--with-tray", "--config", str(write_config(tmp_path))])
+    assert rc == 1
+    assert "--with-tray does not apply to --grasp suction" in capsys.readouterr().err
+    assert fake_hardware.opened == [] and default_poses_path.read_bytes() == before
+
+
+def test_cli_suction_into_a_broken_poses_file_changes_nothing(tmp_path, capsys, fake_hardware,
+                                                              default_poses_path):
+    default_poses_path.write_text("{not json")
+    rc = teach_mod.main(["--grasp", "suction", "--config", str(write_config(tmp_path))])
+    assert rc == 1
+    assert "not valid JSON" in capsys.readouterr().err
+    assert default_poses_path.read_text() == "{not json"
+    assert fake_hardware.opened == []                           # failed before either arm opened
+
+
+def test_cli_real_mode_suction_asks_only_the_suction_steps_and_keeps_the_claw_poses(
+        tmp_path, capsys, fake_hardware, default_poses_path, monkeypatch):
+    claw_before = {k: v for k, v in poses_mod.load(default_poses_path).items() if k not in SUCTION_NAMES}
+    prompts = []
+
+    def person(step, prompt):                      # stands in for enter_waiter: no stdin
+        prompts.append(prompt)
+        if not hasattr(fake_hardware, "script"):
+            fake_hardware.script = suction_scripted(fake_hardware.leader, fake_hardware.follower,
+                                                    with_ready=False)
+        return fake_hardware.script(step, prompt)
+
+    monkeypatch.setattr(teach_mod, "enter_waiter", person)
+    rc = teach_mod.main(["--speed", "25", "--grasp", "suction", "--config", str(write_config(tmp_path))])
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert [p.split("]")[0] for p in prompts] == [f"[{n}" for n in SUCTION_NAMES]
+    saved = poses_mod.load(default_poses_path, "hand")
+    assert {k: v for k, v in saved.items() if k not in SUCTION_NAMES} == claw_before
+    assert set(SUCTION_NAMES) <= set(saved)
+    assert sorted(fake_hardware.closed) == ["follower", "leader"]
+    assert len(list((tmp_path / "data" / "poses_backup").glob("poses-*.json"))) == 1

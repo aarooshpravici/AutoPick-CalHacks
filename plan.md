@@ -431,7 +431,21 @@ result = pick_to_tray(arm, poses, pan_deg=0.0, roll_deg=0.0, policy=None, speed_
 #            "grasp": "scripted" | "policy", "attempts": 1, "seconds": 14.2, "detail": "..."}
 ```
 
-Command line: `python -m arm.pick run [--to hand|tray] [--policy DIR] [--pan DEG] [--roll DEG] [--speed DEG_S] [--dry-run]`. The default is `--to hand`. The last printed line is `RESULT {json}`. Exit codes: 0 taken or in_tray, 1 error or stopped, 2 missed, 3 dropped, 4 stuck, 5 timeout.
+**Suction grasp (the flat-phone path, C5).** The claw can't get under a phone lying flat, so `pick_to_hand(..., grasp="suction")` uses a passive suction cup (an Octobuddy) instead: no pump, no vacuum sensor, and the claw is never moved (it stays at the gripper value taught in `suction_press`).
+
+```python
+result = pick_to_hand(arm, poses, grasp="suction", suction_dwell_s=2.0, suction_hold_s=4.0, speed_deg_s=45)
+# ready -> suction_above -> suction_press (at most 15 deg/s) -> dwell 2 s -> back up to
+# suction_above (15 deg/s) -> suction_lift -> suction_present (at most 25 deg/s)
+# -> timed hold 4 s -> ready
+```
+
+- **Poses:** `suction_above`, `suction_press`, `suction_lift`, `suction_present`, plus `ready`, taught with `python -m arm.teach --grasp suction`. They are merged into the existing `config/poses.json`, so the claw poses stay. A file with only these poses is valid for suction (`python -m arm.check --to suction`); the claw poses and claw values are not needed.
+- **The 4 s hold is timed.** Nothing can sense the pull, so after `suction_hold_s` the arm goes back to `ready` and reports `"taken"`. A cup that never stuck, a phone that fell off and a pull that never came all look the same. The `detail` says so ("no sensor, so the seal and the pull were not checked"); anything that must know has to check another way (the camera).
+- **`handoff_timeout_s` and `handoff_grip` belong to the claw** and are ignored. There is no policy or tray variant.
+- Command line: `python -m arm.pick run --grasp suction [--suction-dwell S] [--suction-hold S]`. `--dry-run` uses the sim's passive cup (`SimArm`: it sticks after `seal_after_s` of pressing, `--sim-miss N` makes the first N presses fail, `--sim-slip` drops it while lifting). The result's `grasp` is `"suction"`.
+
+Command line: `python -m arm.pick run [--to hand|tray] [--grasp claw|suction] [--policy DIR] [--pan DEG] [--roll DEG] [--speed DEG_S] [--dry-run]`. The default is `--to hand`. The last printed line is `RESULT {json}`. Exit codes: 0 taken or in_tray, 1 error or stopped, 2 missed, 3 dropped, 4 stuck, 5 timeout.
 
 ### 9.5 Serial protocol (Mac ↔ Uno R4, USB, 115200 baud, one command per line)
 
