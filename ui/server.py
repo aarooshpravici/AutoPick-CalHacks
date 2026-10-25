@@ -183,6 +183,18 @@ def create_app(brain: Brain, parse=request_mod.parse_request, clarify=request_mo
         stop_now()
         return {"stopped": True, "brain_ms": round((time.monotonic() - t0) * 1000, 1)}
 
+    @app.post("/arm-camera")
+    async def arm_camera():
+        """A14: after parking, switch the RealSense to its grey IR view and start the arm."""
+        go = getattr(brain, "arm_camera_go", None)
+        if go is None:
+            raise HTTPException(409, "this brain has no arm-camera switch")
+        try:
+            await run_in_threadpool(go)
+        except RuntimeError as error:
+            raise HTTPException(409, str(error))
+        return {"switching": True}
+
     async def dispatch_fetch(parsed, hand, seen, distance_ft=None):
         def begin():
             # Recheck after waiting for a thread: a queued request must not undo STOP.
@@ -488,6 +500,7 @@ footer { display:flex; justify-content:space-between; gap:16px; padding-top:24px
       <section class="card" id="statecard">
         <div class="card-label"><h3>Mission status</h3><span class="card-number">02 / PROGRESS</span></div>
         <div id="state" aria-live="polite">Connecting…</div><div id="message"></div>
+        <button class="go" id="armcam" type="button" hidden>Switch to arm camera ↗</button>
         <ol id="steps" aria-label="Hand-off steps"><li id="step-Search">Search</li><li id="step-Approach">Drive</li><li id="step-Pick">Pick</li><li id="step-Present">Present</li><li id="step-WaitForTake">Take</li></ol>
       </section>
       <section class="stop-panel" aria-label="Stop control"><button id="stop" type="button" aria-label="STOP"><span class="stop-symbol" aria-hidden="true"></span>STOP</button><div class="stop-caption"><span>Stop motion · hold the arm</span><span>or press <kbd>Esc</kbd></span></div></section>
@@ -520,7 +533,7 @@ const label = s => s.replaceAll("_", " ");
 
 // The hand-off, in order (plan 10.7), and what the big heading says for each state.
 const STEPS = ["Search", "Approach", "Pick", "Present", "WaitForTake"];
-const TITLES = {Search: "Searching", Approach: "Driving over", Pick: "Picking it up", Present: "Holding it up"};
+const TITLES = {Search: "Searching", Approach: "Driving over", ArmCamera: "Parked", Pick: "Picking it up", Present: "Holding it up"};
 const title = s => s.state === "WaitForTake" ? (s.item ? `Take your ${label(s.item)}` : "Take it")
                                               : TITLES[s.state] || s.state;
 
@@ -598,6 +611,18 @@ async function stop() {
   stopRetry = setTimeout(stop, 1000);
 }
 $("stop").addEventListener("click", stop);
+
+// A14: parked; the person starts the switch to the grey IR arm camera and the arm policy.
+async function armCamera() {
+  $("armcam").setAttribute("aria-disabled", "true");
+  try {
+    const r = await call("/arm-camera", {method: "POST"}, 3000);
+    $("reply").textContent = r.ok ? "Switching to the arm camera" : `Not switched (${r.body && r.body.detail || r.status})`;
+  } catch (e) { $("reply").textContent = `Not switched (${why(e)})`; }
+  $("armcam").removeAttribute("aria-disabled");
+  refresh();
+}
+$("armcam").addEventListener("click", armCamera);
 document.addEventListener("keydown", e => { if (e.key === "Escape") stop(); });
 
 $("ask").addEventListener("submit", e => {
@@ -674,7 +699,8 @@ async function refresh() {
     if ($("state").textContent !== title(s)) $("state").textContent = title(s);
     $("message").textContent = s.message || "";
     $("statecard").dataset.state = s.state;
-    const at = STEPS.indexOf(s.state);
+    $("armcam").hidden = s.state !== "ArmCamera";
+    const at = STEPS.indexOf(s.state === "ArmCamera" ? "Pick" : s.state);
     STEPS.forEach((n, i) => $("step-" + n).setAttribute("data-step", i < at ? "done" : i === at ? "now" : "todo"));
     $("item").textContent = s.item ? label(s.item) : "–";
     $("detection").textContent = s.detection ? `${s.detection.label} ${Math.round(s.detection.conf * 100)}%` : "–";

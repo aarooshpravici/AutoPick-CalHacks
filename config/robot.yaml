@@ -42,6 +42,7 @@ perception:
   detector_conf: 0.5
   detections_udp: 127.0.0.1:5601
   hand_udp: 127.0.0.1:5602
+  control_udp: 127.0.0.1:5603         # A14: brain asks the publisher to release/resume the RealSense
   # Floor origin: directly below front camera; x forward, y left, metres.
   parking_spot_floor_m: [0.22, 0.0]   # Replace with the P4 measurement.
   parking_tolerance_m: 0.02
@@ -51,6 +52,10 @@ handoff:
   suction_hold_s: 4                   # Timed only: does not verify a seal or take.
   timeout_s: 60                       # seconds holding at the present pose before giving up
   grip: squeeze                       # squeeze (firm) or light; decided by the A5 pull test (D9)
+  # A14: after parking, wait for the page's "Switch to arm camera" button, switch the RealSense to
+  # its grey IR view, show a preview window, then run this ACT checkpoint (null: taught-pose pick).
+  # Local example (SW1's Mac): data/checkpoints/act_grasp_v1_ir_local/checkpoints/020000/pretrained_model
+  arm_policy: null
 lift:
   seated_hand_mm: 700
   standing_hand_mm: 1000

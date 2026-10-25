@@ -117,11 +117,32 @@ def annotated_frame(colour, message, *, simulated=False):
     return view
 
 
+class Released(Exception):
+    """The brain asked for the RealSense (A14 arm camera); `sender` gets the confirmation."""
+
+    def __init__(self, sender):
+        super().__init__("release requested")
+        self.sender = sender
+
+
+def control_message(control):
+    """One pending datagram from the control socket, or (None, None)."""
+    if control is None:
+        return None, None
+    try:
+        return control.recvfrom(64)
+    except (BlockingIOError, socket.timeout):
+        return None, None
+
+
 def publish(camera, detector, sock, destination, *, conf=.5, homography=None,
-            hz=15, count=None, preview=False, simulated=False):
+            hz=15, count=None, preview=False, simulated=False, control=None):
     sent = 0
     while count is None or sent < count:
         start = time.monotonic()
+        data, sender = control_message(control)
+        if data == b"release":
+            raise Released(sender)
         frame = camera.read()
         message = make_message(frame, detector(frame.colour), conf=conf, homography=homography)
         sock.sendto(json.dumps(message, allow_nan=False).encode(), destination)
@@ -159,19 +180,52 @@ def main(argv=None):
     homography = None if args.fake else load_homography(args.config.parent / "floor_homography.json", settings)
     destination = address(cfg["detections_udp"])
     print(f"{'SIMULATED' if args.fake else 'LIVE'} detections → {destination}; floor mapping={homography is not None}", flush=True)
+    control = None
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-            with (FakeCamera if args.fake else RealSense)(settings) as camera:
-                publish(camera, detector, sock, destination, conf=conf,
-                        homography=homography, hz=args.hz, count=args.count,
-                        preview=args.preview, simulated=args.fake)
+            if cfg.get("control_udp"):
+                control = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                control.bind(address(cfg["control_udp"]))
+                control.setblocking(False)
+            while True:
+                try:
+                    with (FakeCamera if args.fake else RealSense)(settings) as camera:
+                        publish(camera, detector, sock, destination, conf=conf,
+                                homography=homography, hz=args.hz, count=args.count,
+                                preview=args.preview, simulated=args.fake, control=control)
+                    break
+                except Released as release:
+                    # The with-block has closed the camera; only now may the brain open it as IR.
+                    if args.preview:
+                        import cv2
+                        cv2.destroyAllWindows(); cv2.waitKey(1)
+                    control.sendto(b"released", release.sender)
+                    print("RealSense released to the arm cameras; waiting for resume", flush=True)
+                    wait_for_resume(control)
+                    print("Resuming colour detections", flush=True)
     except KeyboardInterrupt:
         pass
     finally:
+        if control is not None:
+            control.close()
         if args.preview:
             import cv2
             cv2.destroyAllWindows()
     return 0
+
+
+def wait_for_resume(control):
+    """Block until "resume"; repeated "release" requests are confirmed again (lost replies)."""
+    control.setblocking(True)
+    try:
+        while True:
+            data, sender = control.recvfrom(64)
+            if data == b"resume":
+                return
+            if data == b"release":
+                control.sendto(b"released", sender)
+    finally:
+        control.setblocking(False)
 
 
 if __name__ == "__main__":
