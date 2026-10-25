@@ -171,6 +171,8 @@ def test_feet_limit_reaches_r4_and_stays_stopped(wire, tmp_path, seen_at_limit):
             assert 'LIMIT 3.048000' in commands
             first_drive = next(i for i, c in enumerate(commands) if c.startswith('DRIVE '))
             assert commands.index('LIMIT 3.048000') < first_drive
+            stopped_at = time.monotonic()
+            wait_for(lambda: driver.status().received_at > stopped_at)
             status = driver.status()
             travel = (abs(status.left_steps) + abs(status.right_steps)) / 2 * (3.14159265 * 71 / 4096)
             assert 0 < travel <= 3.048

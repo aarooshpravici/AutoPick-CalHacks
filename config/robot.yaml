@@ -46,6 +46,9 @@ perception:
   parking_spot_floor_m: [0.22, 0.0]   # Replace with the P4 measurement.
   parking_tolerance_m: 0.02
 handoff:
+  grasp: claw                        # Set suction only after teaching/validating the mounted cup.
+  suction_dwell_s: 2
+  suction_hold_s: 4                   # Timed only: does not verify a seal or take.
   timeout_s: 60                       # seconds holding at the present pose before giving up
   grip: squeeze                       # squeeze (firm) or light; decided by the A5 pull test (D9)
 lift:

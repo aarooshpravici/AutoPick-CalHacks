@@ -64,7 +64,7 @@ Read `plan.md` and `AGENTS.md` too. This file overrides the schedule in plan 14.
 
 **Docs:** #30, #31, #55.
 
-**Coming from SW1's background agents, by about 03:00** (watch issue #1):
+**Expected from SW1's background agents, by about 03:00** (watch issue #1; these are dependencies, not completed work):
 - **`integration/demo`:** a branch where every open PR is already merged in order, with the full test suite and a simulated Phone mission plus STOP run on it. Use it to merge for real in minutes, or merge it directly if SW2 prefers.
 - **A safety review of the stack:** firmware/serial, navigation, web → serial, and changes to `arm/`. Each finding is checked by a skeptic, and SW1's Claude will post the confirmed ones on issue #1.
 - **`task/DEMO-runbook`:** `docs/demo-runbook.md`, with the pre-flight checks, the exact start-up commands, the shot list and the cover-ups.
@@ -74,12 +74,12 @@ Read `plan.md` and `AGENTS.md` too. This file overrides the schedule in plan 14.
 | # | Task | Done when | Target |
 |---|---|---|---|
 | H1 | ~~Safe teleop tool~~ **Done by SW1's Claude:** `python -m arm.teleop --speed 25` (#58) | — | done |
-| H2 | **Merge to main.** Decide your own REQ-codex-6 (floor_homography.json schema), -7 (navigation settings in robot.yaml), -8 and -9 (web → R4, firmware/driver/brain). Use the review findings and `integration/demo`. Fix any confirmed blocker first. | main has every PR the demo needs; the full suite passes on main (exit 0) | 02:45 |
-| H3 | **Base bring-up.** Flash the R4 from main. `python -m base.link` check (PING/STAT/STOP only, nothing moves). Then, with the wheels off the ground: forward, back, turn left, turn right, each confirmed to go **the right way**. Then on the floor. The page STOP and the E-stop stop it every time. | Directions right; STOP and E-stop verified on the floor | 03:30 |
-| H4 | **Arm on the base.** SW1 runs `bus_health.py`, re-teaches with `python -m arm.teach --speed 25` at the parking spot, then `python -m arm.pick run --speed 25` 3/3 with the demo object | 3/3 pick → present → take from the parking spot | 04:30 |
-| H5 | **Grasp for the video (D1).** Claw on the sock or remote, or Octobuddy via `--grasp suction` (#54). Pick one. | Decision posted on #1 | 04:30 |
-| H6 | **Perception live** on SW1's Mac: RealSense + YOLO publisher (P3, sudo). Floor calibration at 3 measured points, plus the parking spot (P4). | `floor_m` within about 2 cm at 3 points; detections at about 15 Hz | 05:30 |
-| H7 | **End-to-end on the real robot (M2).** Tap Phone on the page, then: search/approach (33 cm guard), park, pick, present, take. | At least 1 clean run on camera, then as many as time allows | 07:00 |
+| H2 | **Merge to main.** Decide your own REQ-codex-6 (floor_homography.json schema), -7 (navigation settings in robot.yaml), -8 and -9 (web → R4, firmware/driver/brain). Use the review findings and `integration/demo`. Fix any confirmed blocker first. | main has every PR the demo needs; the full suite passes on main (exit 0) | After integration and review are available |
+| H3 | **Base bring-up.** Flash the R4 from main. `python -m base.link --port <measured-R4-port>` check (PING/STAT/STOP only, nothing moves). Use the reviewed generated wiring header and LIMIT-capable firmware/driver together. The human-run `base.jog --real` tool asks for Enter and sets a small LIMIT before each movement. Then, with the wheels off the ground: forward, back, turn left, turn right, each confirmed to go **the right way**. Then on the floor. The page STOP and the E-stop stop it every time. | Directions right; STOP and E-stop verified on the floor | 03:30 |
+| H4 | **Arm on the base.** SW1 runs `bus_health.py`, re-teaches with `python -m arm.teach --speed 25` at the parking spot, then `python -m arm.pick run --speed 25` 3/3 with the demo object (add `--grasp suction` to both commands for the cup) | 3/3 pick → present → take from the parking spot | 04:30 |
+| H5 | **Grasp for the video (D1).** Phone remains the autonomous software target. Choose/validate its grip before H4: Octobuddy via `--grasp suction` (#54) is available, but mounting is unverified. A sock/remote demonstration is assisted/labelled teleop until its detector, item configuration and UI are integrated. Set `handoff.grasp: suction` only with matching taught suction poses; the timed cup sequence does not verify seal/take. | Decision posted on #1 | 04:30 |
+| H6 | **Perception live** on SW1's Mac: RealSense + YOLO publisher (P3, sudo). Floor calibration with at least 4 fit points plus 3 independent check points, then the measured reachable parking spot (P4). | `floor_m` within about 2 cm at 3 points; detections at about 15 Hz | 05:30 |
+| H7 | **End-to-end on the real robot (M2).** Enter feet, select Phone and hand-off height, then Start request: search/approach (33 cm guard), park, pick, present, take. | At least 1 clean run on camera, then as many as time allows | 07:00 |
 | H8 | **Shoot the video** from `docs/demo-runbook.md`, with the cover-ups below | Video exported | 08:15 |
 
 **If time runs out, drop items from the bottom up:**
@@ -104,3 +104,10 @@ Read `plan.md` and `AGENTS.md` too. This file overrides the schedule in plan 14.
 - the tray/lift;
 - venue retraining;
 - MediaPipe hand height.
+
+## SW2 software handoff
+
+See `docs/sw2-software-handoff.md` for the tested integration branch, read-only
+checks in SW1's two environments, simulated rehearsal, and bounded commands
+for a person to run on the R4. Nothing in that handoff certifies physical
+traction, E-stop, camera calibration or the phone grip.

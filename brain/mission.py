@@ -19,6 +19,23 @@ from brain.detections import FakeDetections, ReplayDetections, UdpDetections, va
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def grasp_settings(config):
+    """Validate selection before any hardware opens; the passive cup has no take sensor."""
+    handoff = config.get("handoff", {})
+    grasp = handoff.get("grasp", "claw")
+    if grasp not in ("claw", "suction"):
+        raise ValueError("handoff.grasp must be claw or suction")
+    options = {}
+    if grasp == "suction":
+        options["grasp"] = grasp
+        for key, default, maximum in (("suction_dwell_s", 2, 10), ("suction_hold_s", 4, 60)):
+            value = handoff.get(key, default)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 < value <= maximum:
+                raise ValueError(f"handoff.{key} must be positive and at most {maximum} seconds")
+            options[key] = value
+    return grasp, options
+
+
 class SimNavigation:
     """A navigation stand-in, not measured parking or a real search controller."""
     def __init__(self):
@@ -38,6 +55,7 @@ class Mission:
     def __init__(self, config, *, base, arm, source, poses=DEFAULT_POSES,
                  navigator_factory=SimNavigation, pick=pick_to_hand, log_dir=None,
                  period=.1, simulated=True):
+        self.grasp, self.pick_options = grasp_settings(config)
         self.config, self.base, self.arm, self.source = config, base, arm, source
         self.poses, self.pick, self.navigator_factory = poses, pick, navigator_factory
         self.period = period
@@ -228,7 +246,10 @@ class Mission:
                                handoff_timeout_s=self.config["handoff"]["timeout_s"],
                                handoff_grip=self.config["handoff"].get("grip", "squeeze"),
                                stop_event=token, on_state=on_state,
-                               log=lambda message: self._event("arm", message=message))
+                               log=lambda message: self._event("arm", message=message), **self.pick_options)
+            if self.grasp == "suction" and result.get("result") == "taken":
+                result = dict(result, result="unverified", take_verified=False)
+                result["detail"] = "Timed suction sequence finished; seal and take were not sensed. " + result.get("detail", "")
         except Exception as error:
             result = dict(result="stuck", detail=str(error), grasp="scripted", attempts=0, seconds=0)
         with self._lock:
@@ -265,6 +286,9 @@ class Mission:
                     self._last_pick = result
                     if result["result"] == "taken":
                         self._state_to("Idle", "Item taken")
+                    elif result["result"] == "unverified":
+                        self._halt()
+                        self._state_to("Idle", "Suction sequence finished; visually confirm pickup and take")
                     elif result["result"] == "dropped" and self._attempts < 3:
                         self._seen = 0
                         self._navigator = self.navigator_factory()
@@ -333,6 +357,7 @@ class Mission:
                     self._parking_stop_ticket = None
                     self._state_to("Search", "Item lost; searching again")
                 elif self._detection is None:
+                    self._parking_stop_ticket = None
                     self._halt()
                 else:
                     parked, speeds = self._navigator.approach(self._detection)
@@ -345,6 +370,7 @@ class Mission:
                             self._state_to("Pick", "Picking up")
                             start_pick = self._generation, self._token
                     else:
+                        self._parking_stop_ticket = None  # Any renewed approach needs a new stopped acknowledgment.
                         self._drive(speeds)
             elif self._state == "Failed" and not self._io_error and now - self._failed_at > 1:
                 self._state_to("Idle", self._message)
@@ -383,6 +409,7 @@ class Mission:
 
 
 def build(config, sim):
+    grasp_settings(config)
     if not sim:
         return build_real(config)
     cfg = config["base"]
@@ -396,17 +423,29 @@ def build_real(config):
     from arm.poses import load
     from perception.floor import FloorMap
     from brain.navigation import RealNavigation
+    grasp, _ = grasp_settings(config)
     cfg = config["base"]
-    if not cfg.get("wiring_confirmed") or not cfg.get("drive_calibrated"):
+    if cfg.get("wiring_confirmed") is not True or cfg.get("drive_calibrated") is not True:
         raise RuntimeError("Real M1 requires P4 and completed wiring/loaded-drive checks")
-    if "XXXX" in cfg["serial_port"]:
+    arm_cfg = config["arm"]
+    frozen = arm_cfg.get("frozen_joints")
+    if not isinstance(frozen, list) or "wrist_roll" not in frozen:
+        raise RuntimeError("faulty wrist_roll must remain frozen before real startup")
+    for name, maximum in (("max_relative_target_deg", 10), ("move_speed_deg_s", 45)):
+        value = arm_cfg.get(name)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 < value <= maximum:
+            raise RuntimeError(f"invalid arm safety limit: {name}")
+    port_name = cfg.get("serial_port")
+    if not isinstance(port_name, str) or not port_name.startswith("/dev/") or "XXXX" in port_name:
         raise RuntimeError("configure the measured Uno R4 serial port")
+    normalize = lambda p: p.replace("/dev/tty.", "/dev/cu.")
+    if normalize(port_name) in [normalize(arm_cfg[key]) for key in ("follower_port", "leader_port")]:
+        raise RuntimeError("R4 port must not be an arm port")
     floor = FloorMap.load(ROOT / "config/floor_homography.json",
                           colour_size=config["realsense"]["colour"], flip=config["realsense"]["flip"])
-    import math
     if math.dist(floor.parking(), config["perception"]["parking_spot_floor_m"]) > 1e-6:
         raise RuntimeError("P4 parking target differs from robot.yaml")
-    poses = load(ROOT / "config/poses.json", mode="hand")
+    poses = load(ROOT / "config/poses.json", mode="suction" if grasp == "suction" else "hand")
     factory = lambda: RealNavigation(config, floor)
     factory()  # Validate navigation before ports are opened.
     base = arm = source = None

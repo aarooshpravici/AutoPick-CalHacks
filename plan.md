@@ -486,6 +486,14 @@ parse_request("stop!")               # -> {"action": "stop", "item": None}
 
 ### 9.7 Status page (`ui/server.py`, FastAPI, port 8000)
 
+The integrated brain reads `handoff.grasp` (`claw`, default, or `suction`),
+`suction_dwell_s` (default 2, >0 through 10) and `suction_hold_s` (default 4,
+>0 through 60). Suction uses the matching suction poses/API from #54. Its timed
+completion is exposed as `last_pick.result: unverified` with `take_verified: false`,
+and Idle asks the person to visually confirm the pickup/take. The arm API's
+original result is not proof of a sensed seal or take. Speed/STOP caps are unchanged.
+
+
 | Route | Does |
 |---|---|
 | `GET /` | The page: feet estimate, object selection, hand-off height, Start request, tutorial, big STOP button and current state |
