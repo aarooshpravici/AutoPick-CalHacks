@@ -226,6 +226,7 @@ This is a stretch goal. It is built only after G4, and only if everything else w
 - **The SO-101 claw is tested first (task A5, decision D1):** can it pick up a phone lying flat on the floor, face up and face down, with and without a case? It must also hold the phone at the present pose for 60 s and let it go when a person pulls.
 - If yes, add thin anti-slip fingertip pads (grip tape or printed TPU covers) and keep the claw.
 - If no, add a spring-mounted bellows suction cup beside the claw with a 12 V pump, a vent valve and a vacuum sensor ([section 12](#12-parts-list)). The phone pickup then becomes scripted: lower until the sensor reads sealed, then lift.
+- **Octobuddy finding (Sat 24 Oct, SW1):** an Octobuddy (a suction-cup phone holder) does stick to the phone, but whether it holds depends on the case. **Open question:** can it be fixed to the gripper, and does it still stick when the arm presses it onto the phone and lifts? Test this before relying on it for D1.
 - Keep anything mounted on the wrist light. Weigh the wrist camera together with its mount.
 
 ---
@@ -656,6 +657,8 @@ flowchart TD
 3. Stop when the phone is within `parking_tolerance_m`, or if it's lost for more than 1 s.
 4. Measure the parking precision (10 tries) and post it: ACT recording uses it.
 
+**Reach limit (Sat 24 Oct, SW1):** if the phone is more than about **13 in (33 cm)** away, the robot must drive closer before it tries to pick it up. Never start a pick from farther than that. (13 in is SW1's estimate of the arm's reach; measure it on the final base.)
+
 **Search (`brain/search.py`).** Turn in steps of about 30°, pausing to look, until the phone is seen with confidence ≥ 0.6 for 5 frames in a row. Give up after two full turns. With the low camera the phone has to be within about 1 m to be seen.
 
 **Done when** the robot parks within ±2–3 cm in 8 of 10 tries from 1 m away, and the scripted pick then succeeds from that parked position.
@@ -723,6 +726,7 @@ stateDiagram-v2
 ```
 
 - **Loop and logging:** the brain runs a 10 Hz loop and logs every state change and message to `data/logs/<date>.jsonl`.
+- **No pick from too far:** Approach goes to Pick only when the item is within about 13 in (33 cm). Farther than that, keep approaching (10.4, reach limit).
 - **Attempt limit:** at most 3 full attempts per request (search to pick), then it reports `Failed`.
 - **Simulated components:** it accepts the simulated arm, the fake serial port and replayed detection logs, so the whole mission can run without hardware.
 - **Known limit:** if the object slips while presenting, it looks the same as "taken".
