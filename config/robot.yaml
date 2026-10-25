@@ -37,6 +37,8 @@ base:
   acceleration_mm_s2: 30
   stop_acceleration_mm_s2: 300
 perception:
+  detector_weights: data/models/phone_v2.pt  # Local file; never committed.
+  detector_conf: 0.5
   detections_udp: 127.0.0.1:5601
   hand_udp: 127.0.0.1:5602
   # Floor origin: directly below front camera; x forward, y left, metres.
