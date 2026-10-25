@@ -11,7 +11,10 @@ existing file is backed up to data/poses_backup/ first.
 
 The steps are the hand-off poses (ready, above_object, at_object, lift, present),
 then the claw open and closed. --with-tray also teaches above_tray, after present,
-for the stretch tray mode.
+for the stretch tray mode. If the claw open and closed come out too close together
+(one didn't open or close fully), both claw steps are asked again: the poses taught
+so far are kept. While teaching, LeRobot's warning that it eased the claw (its step
+cap) is muted, so the prompts stay readable.
 
 Speed: config/robot.yaml `arm.move_speed_deg_s` is the ceiling, as for arm.pick.
 The follower copies the leader at that speed by default; a larger --speed is
@@ -26,6 +29,7 @@ config/poses.json.
 from __future__ import annotations
 
 import argparse
+import logging
 import shutil
 import sys
 import tempfile
@@ -52,10 +56,23 @@ TRAY_STEP = ("above_tray", "claw over the tray at its lowest position (stretch t
 CONFIG_KEYS = ("follower_port", "follower_id", "leader_port", "leader_id")
 SAME_POSE_DEG = 2.0         # a pose this close to the previous one on every arm joint wasn't moved to
 DRY_RUN_LIMIT_S = 600.0     # simulated seconds the scripted person waits for the follower per step
+CLAMP_LOGGER = "lerobot.robots.utils"   # LeRobot's "had to be clamped to be safe" step-cap warning
 
 
 class TeachError(RuntimeError):
     pass
+
+
+class _QuietClawClamp(logging.Filter):
+    """Drops LeRobot's step-cap warning when only the claw was clamped. Teaching sends the
+    claw straight to the leader's claw and the cap eases it there, so the warning fills the
+    screen and buries the prompts. An arm joint clamped (lagging behind) still shows."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        if not msg.startswith("Relative goal position magnitude had to be clamped"):
+            return True
+        return not ("'gripper'" in msg and not any(f"'{j}'" in msg for j in ARM_JOINTS))
 
 
 # --- waiting for the person --------------------------------------------------
@@ -158,7 +175,8 @@ def teach(leader, follower, speed_deg_s: float, wait_for=enter_waiter, log=print
     wait_for(step, prompt) returns an object whose is_set() is polled every tick and turns
     true when the person pressed Enter. with_tray also teaches above_tray. align(leader,
     follower), if given, runs first, before the follower is ever commanded (main passes the
-    live table for real arms). Returns the validated poses (raises PosesError)."""
+    live table for real arms). Claw open and closed less than poses.MIN_CLAW_GAP apart: both
+    claw steps are asked again. Returns the validated poses (raises PosesError)."""
     if not (_is_number(speed_deg_s) and 0 < speed_deg_s <= MAX_SPEED_DEG_S):
         raise ValueError(f"speed_deg_s must be in (0, {MAX_SPEED_DEG_S:g}] deg/s (plan section 17), "
                          f"got {speed_deg_s!r}")
@@ -171,8 +189,15 @@ def teach(leader, follower, speed_deg_s: float, wait_for=enter_waiter, log=print
     cmd = follower.read()
     recorded = {}
     last_name = None
+    steps = teach_steps(with_tray)
+    names = [name for name, _ in steps]
+    quiet = _QuietClawClamp()
+    clamp_log = logging.getLogger(CLAMP_LOGGER)
+    clamp_log.addFilter(quiet)
     try:
-        for name, hint in teach_steps(with_tray):
+        i = 0
+        while i < len(steps):
+            name, hint = steps[i]
             prompt = f"[{name}] {hint}. Press Enter here when the follower is there: "
             while True:
                 pressed = wait_for(name, prompt)
@@ -193,8 +218,20 @@ def teach(leader, follower, speed_deg_s: float, wait_for=enter_waiter, log=print
             if name in POSE_NAMES:
                 last_name = name
             log(f"  {name}: " + ", ".join(f"{j} {pose[j]:.1f}" for j in JOINTS))
+            if name == "gripper_closed":
+                opened = recorded["gripper_open"]["gripper"]
+                if abs(opened - pose["gripper"]) < poses_mod.MIN_CLAW_GAP:
+                    log(f"  the claw read {opened:.1f} open and {pose['gripper']:.1f} closed, less than "
+                        f"{poses_mod.MIN_CLAW_GAP:g} apart: it didn't open or close fully. Teach both claw "
+                        f"steps again (the follower's claw is slow: wait for it before pressing Enter).")
+                    i = names.index("gripper_open")
+                    continue
+            i += 1
     finally:
-        follower.command(follower.read())       # hold where it is
+        try:
+            follower.command(follower.read())   # hold where it is
+        finally:
+            clamp_log.removeFilter(quiet)
     poses = {name: recorded[name] for name in POSE_NAMES if name in recorded}
     poses["gripper_open"] = recorded["gripper_open"]["gripper"]
     poses["gripper_closed"] = recorded["gripper_closed"]["gripper"]

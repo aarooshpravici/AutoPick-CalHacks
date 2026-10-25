@@ -474,21 +474,84 @@ def test_cli_interrupt_while_teaching_closes_both_and_saves_nothing(tmp_path, ca
     assert default_poses_path.read_bytes() == before
 
 
-def test_cli_invalid_poses_are_not_saved(tmp_path, capsys, monkeypatch, fake_hardware, default_poses_path):
-    """The claw open and closed steps taught at the same value: refused, nothing written."""
-    before = default_poses_path.read_bytes()
-    poses = json.loads(json.dumps(DEFAULT_POSES))
-    poses["gripper_closed"] = poses["gripper_open"] - 3
+def test_cli_bad_claw_steps_are_asked_again_and_the_session_is_kept(tmp_path, capsys, monkeypatch,
+                                                                    fake_hardware, default_poses_path):
+    """The claw open step taught nearly closed: both claw steps are asked again, nothing is
+    thrown away, and the good second try is saved."""
+    bad = json.loads(json.dumps(DEFAULT_POSES))
+    bad["gripper_open"] = bad["gripper_closed"] + 3
+    asked = []
 
     def person(step, prompt):
-        if not hasattr(fake_hardware, "script"):
-            fake_hardware.script = scripted(fake_hardware.leader, fake_hardware.follower, poses)
-        return fake_hardware.script(step, prompt)
+        asked.append(step)
+        if not hasattr(fake_hardware, "first"):
+            fake_hardware.first = scripted(fake_hardware.leader, fake_hardware.follower, bad)
+            fake_hardware.again = scripted(fake_hardware.leader, fake_hardware.follower)
+        return (fake_hardware.again if asked.count(step) > 1 else fake_hardware.first)(step, prompt)
 
     monkeypatch.setattr(teach_mod, "enter_waiter", person)
     rc = teach_mod.main(["--config", str(write_config(tmp_path))])
-    assert rc == 1 and "less than 10 apart" in capsys.readouterr().err
-    assert default_poses_path.read_bytes() == before
+    out = capsys.readouterr().out
+    assert rc == 0 and "Teach both claw steps again" in out
+    assert asked[-4:] == ["gripper_open", "gripper_closed", "gripper_open", "gripper_closed"]
+    assert asked.count("ready") == 1                # the arm poses weren't taught again
+    assert_matches_default(poses_mod.load(default_poses_path))
+
+
+def test_a_claw_gap_too_small_asks_both_claw_steps_again():
+    leader, follower = SimLeader(), SimArm()
+    bad = json.loads(json.dumps(DEFAULT_POSES))
+    bad["gripper_closed"] = bad["gripper_open"] - 4     # "closed" taught barely closed
+    first, again = scripted(leader, follower, bad), scripted(leader, follower)
+    asked, logs = [], []
+
+    def wait_for(step, prompt):
+        asked.append(step)
+        return (again if asked.count(step) > 1 else first)(step, prompt)
+
+    taught = teach(leader, follower, speed_deg_s=45, wait_for=wait_for, log=logs.append)
+    assert asked == ["ready", "above_object", "at_object", "lift", "present",
+                     "gripper_open", "gripper_closed", "gripper_open", "gripper_closed"]
+    assert any("less than 10 apart" in m for m in logs)
+    assert_matches_default(taught)
+
+
+def clamp_warning(**joints):
+    """LeRobot's step-cap warning, worded as lerobot/robots/utils.py logs it."""
+    from pprint import pformat
+    return ("Relative goal position magnitude had to be clamped to be safe.\n"
+            + pformat({j: {"original goal_pos": v, "safe goal_pos": v / 2} for j, v in joints.items()}, indent=4))
+
+
+def test_claw_clamp_warning_is_muted_only_while_teaching(caplog):
+    lerobot_log = __import__("logging").getLogger(teach_mod.CLAMP_LOGGER)
+
+    class Warns(SimArm):
+        def command(self, targets):
+            lerobot_log.warning(clamp_warning(gripper=95.0))
+            lerobot_log.warning(clamp_warning(elbow_flex=40.0))
+            super().command(targets)
+
+    leader, follower = SimLeader(), Warns()
+    with caplog.at_level("WARNING", logger=teach_mod.CLAMP_LOGGER):
+        teach(leader, follower, speed_deg_s=45, wait_for=scripted(leader, follower), log=QUIET)
+        during = [r.getMessage() for r in caplog.records]
+        caplog.clear()
+        lerobot_log.warning(clamp_warning(gripper=95.0))
+    assert during and all("'elbow_flex'" in m for m in during)     # an arm joint clamped still shows
+    assert len(caplog.records) == 1                                 # muted only while teaching
+    assert lerobot_log.filters == []
+
+
+@pytest.mark.parametrize("message, shown", [
+    (clamp_warning(gripper=95.0), False),
+    (clamp_warning(gripper=95.0, wrist_flex=30.0), True),
+    (clamp_warning(shoulder_lift=30.0), True),
+    ("some other LeRobot warning about 'gripper'", True)])
+def test_quiet_claw_clamp_filter(message, shown):
+    import logging
+    record = logging.LogRecord(teach_mod.CLAMP_LOGGER, logging.WARNING, __file__, 1, message, None, None)
+    assert teach_mod._QuietClawClamp().filter(record) is shown
 
 
 def test_cli_help_needs_no_config(capsys):
