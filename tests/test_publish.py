@@ -80,5 +80,5 @@ def test_udp_publish_uses_stub_without_weights():
 def test_live_summary_includes_empty_frames(frame):
     message = make_message(frame, [Detection("phone", .9, (0, 0, 4, 4))])
     result = summary([message, make_message(frame, [])], 1, "0.5m-left")
-    assert result == dict(placement="0.5m-left", frames=2, detected_frames=1,
+    assert result == dict(label="phone", placement="0.5m-left", frames=2, detected_frames=1,
                           detected=True, hz=2, max_conf=.9, mean_pixel_height=4)
