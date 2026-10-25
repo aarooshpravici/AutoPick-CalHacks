@@ -54,6 +54,7 @@ lift:
   taken_weight_drop_g: 50
 items: [phone]                        # stretch: glasses, pill_bottle, remote, pen, sock
 navigation:                         # Draft B5/B6 settings; physical acceptance pending.
+  pickup_max_distance_m: 0.33        # Provisional camera-floor reference; verify on final base.
   detection_max_age_s: 0.3
   settle_frames: 3
   approach_timeout_s: 120

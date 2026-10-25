@@ -18,6 +18,11 @@ class Parking:
         self.track = config['base']['track_width_mm']
         self.limit = config['base']['max_speed_mm_s']
         self.cfg = config['navigation']
+        self.pickup_max = self.cfg.get('pickup_max_distance_m', .33)
+        if not math.isfinite(self.pickup_max) or self.pickup_max <= 0:
+            raise ValueError('pickup range must be positive and finite')
+        if math.hypot(*self.target) > self.pickup_max:
+            raise ValueError('measured parking target exceeds pickup range; verify camera/arm reference')
         self.started = None
         self.last_frame = None
         self.settled = 0
@@ -38,7 +43,7 @@ class Parking:
             return Command(reason='waiting for fresh calibrated detection')
         x, y = floor
         dx, dy = x - self.target[0], y - self.target[1]
-        if math.hypot(dx, dy) <= self.tolerance:
+        if math.hypot(dx, dy) <= self.tolerance and math.hypot(x, y) <= self.pickup_max:
             if frame != self.last_frame:
                 self.settled += 1
             self.last_frame = frame

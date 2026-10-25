@@ -221,3 +221,37 @@ def test_real_gate_does_not_connect_with_unmeasured_base(config, monkeypatch):
     config['base']['wiring_confirmed'] = True
     with pytest.raises(RuntimeError, match='loaded-drive'):
         build(config, sim=False)
+
+
+def test_old_firmware_rejects_budget_before_any_drive(make):
+    class OldFirmware(FakeSerial):
+        def write(self, data):
+            if data.startswith(b'LIMIT '):
+                with self._lock:
+                    self.commands.append(data.decode().strip())
+                    self._lines.append(b'ERR invalid command\n')
+                return len(data)
+            return super().write(data)
+    port = OldFirmware()
+    brain = make(port=port)
+    brain.request('phone', 'standing', max_distance_ft=3.5)
+    wait_for(lambda: brain.status()['state'] == 'Failed')
+    assert 'LIMIT 1066.800000' in port.commands
+    assert not any(c.startswith('DRIVE ') for c in port.commands)
+    with pytest.raises(RuntimeError, match='STOP FAILED'):
+        brain.close()  # Fault remains visible; resources still close in finally.
+
+
+def test_boundary_camera_timeout_stays_stopped(make):
+    port = FakeSerial()
+    class FrozenAtBoundary(FakeDetections):
+        def poll(self):
+            return None if port.limit_reached else super().poll()
+    brain = make(port=port, source=FrozenAtBoundary())
+    brain.request('phone', 'standing', max_distance_ft=.0001)
+    wait_for(lambda: brain.status()['state'] == 'Stopped', timeout=4)
+    assert 'no fresh camera frame' in brain.status()['message']
+    assert brain.status()['last_pick'] is None
+    count = len(port.commands)
+    time.sleep(.15)
+    assert not any(c.startswith('DRIVE ') for c in port.commands[count:])

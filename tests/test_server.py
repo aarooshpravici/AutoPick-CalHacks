@@ -319,7 +319,8 @@ def test_typed_stop_during_parse_drops_the_request(brain):
         assert c.get("/status").json()["state"] == "Stopped"
 
 
-def test_stop_racing_brain_request_still_wins():
+@pytest.mark.parametrize("direct", [False, True])
+def test_stop_racing_brain_request_still_wins(direct):
     class SlowRequestBrain(RecordingBrain):
         def __init__(self):
             super().__init__()
@@ -332,13 +333,15 @@ def test_stop_racing_brain_request_still_wins():
 
     brain = SlowRequestBrain()
     with TestClient(create_app(brain, parse=offline_parse)) as c:
-        t, result = in_thread(lambda: c.post("/request", json={"text": "my pen fell"}))
+        endpoint = "/fetch" if direct else "/request"
+        payload = {"item": "phone"} if direct else {"text": "my pen fell"}
+        t, result = in_thread(lambda: c.post(endpoint, json=payload))
         assert brain.entered.wait(5)
         c.post("/stop")
         brain.release.set()
         t.join(10)
         assert result["value"].json()["dropped"] == "stopped"
-        assert brain.calls[-2:] == [("request", "pen", "seated"), ("stop",)]
+        assert brain.calls[-2:] == [("request", "phone" if direct else "pen", "standing"), ("stop",)]
         assert c.get("/status").json()["state"] == "Stopped"
 
 
@@ -517,6 +520,7 @@ def test_page_uses_the_parsers_stop_words():
     "stop_with_no_answer_fails_after_2_s",
     "ask_server_error_is_not_reported_as_no_connection",
     "ask_is_blocked_while_a_request_is_pending",
+    "phone_button_sends_structured_fetch_without_parser",
     "typed_stop_goes_to_stop_even_while_a_request_is_pending",
     "dropped_request_is_reported",
     "only_one_status_request_at_a_time",
@@ -530,7 +534,7 @@ def test_page_uses_the_parsers_stop_words():
     "typing_an_answer_posts_it_as_the_answer_to_the_question",
     "stop_clears_the_conversation",
     "cancel_clears_the_conversation_without_stopping",
-    "clarify_setting_off_sends_no_dialog_and_hand_seated",
+    "clarify_setting_off_sends_no_dialog_and_hand_standing",
 ])
 def test_page_script(tmp_path, scenario):
     script = tmp_path / "page.js"

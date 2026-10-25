@@ -11,7 +11,13 @@ and replacements may be needed. No upload or powered test has been performed.
 `base.wiring_confirmed` stays false, so DRIVE is refused and coils stay off.
 After repair and HW1/SW2 clearance, set it true, regenerate and build for upload.
 
-The protocol stays at 115200 baud. Wheel speeds are mm/s and STAT counts emitted
+The protocol stays at 115200 baud. This draft adds `LIMIT <mm>` / `OK LIMIT`:
+set a positive budget up to 6096 mm while fully stopped before DRIVE (including
+after boot). The controller sums mean absolute issued left/right half-step
+travel, including turns/reversals, then holds and emits `LIMIT REACHED` with
+STAT until a new LIMIT. STOP/watchdog do not reset it. One half-step reserve
+bounds quantization; this is not ground odometry. Deploy driver/brain/firmware
+together; older firmware rejects LIMIT before any mission drive. Wheel speeds are mm/s and STAT counts emitted
 half steps, not encoders. Stretch commands return `ERR no lift`; lift/weight
 fields are zero. A 300 ms timeout since the last valid DRIVE stops stepping;
 PING/malformed traffic cannot renew it. STOP decelerates quickly then replies
@@ -38,6 +44,11 @@ Build without uploading:
 .venv/platformio/bin/pio run -d base/firmware
 ```
 
+The Apple Silicon build uses pinned GCC ARM 14.2.1 because the platform's default
+GCC package is Intel-only. Arduino core 1.6.0 has a TinyUSB void-return diagnostic;
+`-Wno-error=return-mismatch` retains it as a warning. The board build succeeds
+(3328 bytes RAM, 45092 bytes flash); this is compile evidence, not bench acceptance.
+
 PlatformIO Core 6.1.18; pinned `renesas-ra@1.9.0`, board `uno_r4_wifi`:
 https://docs.platformio.org/en/latest/boards/renesas-ra/uno_r4_wifi.html
 
@@ -51,7 +62,7 @@ c++ -std=c++17 -Wall -Wextra -Werror -I base/firmware/include base/firmware/test
 ```
 
 Bench checklist, ONLY after wiring repair and explicit area-clear approval:
-1. Wheels raised: PING, STAT; low-speed DRIVE each pair; verify coil order/direction.
+1. Wheels raised: PING, STAT, acknowledged STOP, small LIMIT budget; low-speed DRIVE each pair; verify coil order/direction.
 2. STOP and hold; unplug USB while driving and measure stopping <=300 ms.
 3. On the loaded base, measure straight travel/time and turning without stalls.
 4. Measure half steps/rev and effective track width; replace provisional limits.

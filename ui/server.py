@@ -8,7 +8,7 @@
 | Route           | Does                                                              |
 |-----------------|-------------------------------------------------------------------|
 | GET  /          | The page: text box, big STOP button, current state, thumbnails    |
-| POST /request   | {"text": "...", "hand": "seated"|"standing"}: parsed, sent on     |
+| POST /request   | {"text": "...", "hand": "standing"|"seated"}: parsed, sent on     |
 |                 | + "clarify": true, "dialog": [{"question", "answer"}], hand ""   |
 |                 | allowed: may answer {"parsed": {"action": "ask", ...}} instead    |
 | POST /stop      | Stop everything                                                   |
@@ -37,12 +37,12 @@ import threading
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
 from fastapi import FastAPI, HTTPException
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from . import request as request_mod
 
@@ -67,7 +67,7 @@ class Brain(Protocol):
       --sim` and `--real` call it. build() must not move anything.
     """
 
-    def request(self, item: str, hand: str) -> None:
+    def request(self, item: str, hand: str, *, max_distance_ft: float | None = None) -> None:
         """Start fetching `item` (one of robot.yaml `items`) for a person whose hand
         is at `hand` height: "seated" or "standing" (robot.yaml lift.seated_hand_mm
         or lift.standing_hand_mm).
@@ -125,9 +125,16 @@ class Turn(BaseModel):
 
 class RequestBody(BaseModel):
     text: str
-    hand: Any = "seated"      # checked by hand after the STOP check, so "stop" always wins
+    hand: Any = "standing"    # checked by hand after the STOP check, so "stop" always wins
     clarify: bool = False     # True: the robot may ask questions first; hand may then be "" or None
     dialog: list[Turn] = []   # questions already asked for this request and the answers, oldest first
+
+
+class FetchBody(BaseModel):
+    """A selected UI item, never arbitrary serial instructions or model output."""
+    item: Literal["phone"]
+    distance_ft: float | None = Field(default=None, gt=0, le=20, allow_inf_nan=False, strict=True)
+    hand: Literal["seated", "standing"] = "standing"
 
 
 class _StopCount:
@@ -176,6 +183,34 @@ def create_app(brain: Brain, parse=request_mod.parse_request, clarify=request_mo
         stop_now()
         return {"stopped": True, "brain_ms": round((time.monotonic() - t0) * 1000, 1)}
 
+    async def dispatch_fetch(parsed, hand, seen, distance_ft=None):
+        def begin():
+            # Recheck after waiting for a thread: a queued request must not undo STOP.
+            if stops.value != seen:
+                return False
+            if distance_ft is None:
+                brain.request(parsed["item"], hand)
+            else:
+                brain.request(parsed["item"], hand, max_distance_ft=distance_ft)
+            return True
+        try:
+            accepted = await run_in_threadpool(begin)
+        except ValueError as error:
+            raise HTTPException(422, str(error)) from error
+        if not accepted or stops.value != seen:
+            if accepted:
+                brain.stop()
+            return {"parsed": parsed, "dropped": "stopped"}
+        return {"parsed": parsed}
+
+    @app.post("/fetch")
+    async def fetch_selected(body: FetchBody):
+        if "distance_ft" in body.model_fields_set and body.distance_ft is None:
+            raise HTTPException(422, "distance_ft must be a positive number")
+        # The structured form needs no natural-language model or external API.
+        parsed = {"action": "fetch", "item": body.item, "hand": body.hand}
+        return await dispatch_fetch(parsed, body.hand, stops.value, body.distance_ft)
+
     @app.post("/request")
     async def post_request(body: RequestBody):
         # stop wins, before the hand check, the dialog check or the parser
@@ -199,12 +234,7 @@ def create_app(brain: Brain, parse=request_mod.parse_request, clarify=request_mo
         if parsed["action"] == "stop":
             stop_now()
         elif parsed["action"] == "fetch":
-            if stops.value != seen:                    # STOP arrived while parsing
-                return {"parsed": parsed, "dropped": "stopped"}
-            await run_in_threadpool(brain.request, parsed["item"], hand)
-            if stops.value != seen:                    # STOP raced with request(): make sure it wins
-                brain.stop()
-                return {"parsed": parsed, "dropped": "stopped"}
+            return await dispatch_fetch(parsed, hand, seen)
         return {"parsed": parsed}
 
     @app.get("/status")
@@ -240,12 +270,12 @@ class FakeBrain:
         self._lock = threading.Lock()
         self._state = "Idle"
         self._item = None
-        self._hand = "seated"
+        self._hand = "standing"
         self._started = None
         self._last_pick = None
         self._message = "Ready"
 
-    def request(self, item: str, hand: str) -> None:
+    def request(self, item: str, hand: str, *, max_distance_ft: float | None = None) -> None:
         with self._lock:
             self._state, self._item, self._hand = "Search", item, hand
             self._started = time.monotonic()
@@ -385,9 +415,10 @@ dt { color:var(--muted); } dd { margin:0; font-variant-numeric:tabular-nums; ove
 footer { display:flex; justify-content:space-between; gap:16px; padding-top:24px; color:#7a8377; font-size:10px; letter-spacing:.3px; }
 #connection[data-online="false"] { color:var(--stop); } #connection[data-online="false"]::before { background:var(--stop); }
 .stale #state::after { content:" · Offline"; font:14px -apple-system,sans-serif; color:var(--stop); }
-button.phone-choice { grid-column:1/-1; grid-row:1; display:flex; align-items:center; gap:18px; min-height:110px; padding:24px; background:#edf2e6; color:var(--go); border:1px solid #a3b49b; font-size:21px; text-align:left; border-radius:14px; }
-button.phone-choice:hover { background:#dce7d1; border-color:var(--go); }
-.choice-arrow { margin-left:auto; font-size:23px; }
+.distance-field { grid-column:1/-1; display:grid; gap:8px; }
+.distance-field input { width:100%; min-width:0; padding:16px; border:1px solid #a3b49b; border-radius:12px; font:inherit; }
+.distance-field small { color:var(--muted); }
+#go { grid-column:1/-1; margin-top:8px; }
 #ask .select-wrap { grid-column:1/-1; margin-top:10px; }
 @media (min-width:761px) { .side { position:sticky; top:20px; } }
 @media (max-width:900px) { main { padding:0 28px 24px; } .brand-note { display:none; } h2 { font-size:46px; } .workspace { grid-template-columns:minmax(0,1.2fr) minmax(280px,1fr); } .card { padding:22px; } .select-wrap { gap:6px; } button.go { padding:12px 15px; } }
@@ -440,11 +471,13 @@ button.phone-choice:hover { background:#dce7d1; border-color:var(--go); }
   <div class="workspace">
     <section class="card request-card">
       <div class="card-label"><h3>Make a request</h3><span class="card-number">01 / REQUEST</span></div>
-      <h3 class="request-title">What did you drop?</h3><p class="help">Choose an item and we’ll bring it to you.</p>
+      <h3 class="request-title">How far in feet did you drop your item?</h3><p class="help">Enter an estimate, then choose your item. Turning also uses this travel budget. At the limit, we stop and check the camera.</p>
       <form id="ask">
         <input id="text" type="hidden" value="phone">
-        <div class="select-wrap"><label for="hand">Hand-off height</label><select id="hand" aria-label="Hand height"><option value="seated">Seated</option><option value="standing">Standing</option></select></div>
-        <button class="go phone-choice" id="go" type="button" aria-disabled="false"><svg width="28" height="36" viewBox="0 0 28 36" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="5" y="2" width="18" height="32" rx="4"/><path d="M10 6h8M11 29h6"/></svg><span>Phone</span><span class="choice-arrow" aria-hidden="true">↗</span></button>
+        <div class="distance-field"><label for="distance">Estimated distance (feet)</label><input id="distance" type="number" inputmode="decimal" min="0" max="20" step="any" placeholder="e.g. 3.5" required aria-describedby="distance-help"><small id="distance-help">More than 0, up to 20 feet. Motor-step estimate, not exact floor distance.</small></div>
+        <div class="select-wrap"><label for="object">What did you drop?</label><select id="object" required><option value="" selected>Select an object</option value="phone">Phone</option></select></div>
+        <div class="select-wrap"><label for="hand">Hand-off height</label><select id="hand" aria-label="Hand height"><option value="standing" selected>Standing</option><option value="seated">Seated</option></select></div>
+        <button class="go" id="go" type="button" aria-disabled="false">Start request ↗</button>
       </form>
       <label id="setting" hidden><input type="checkbox" id="clarify"> Ask me questions first</label>
       <div id="question" role="status" aria-live="polite" hidden></div><div id="opts"></div>
@@ -537,7 +570,7 @@ $("cancel").addEventListener("click", () => { endConversation(); $("reply").text
 // The "Ask me questions first" setting; the page works without localStorage.
 let handTouched = false;
 try { const v = localStorage.getItem("clarify"); if (v !== null) $("clarify").checked = v === "1"; } catch (e) {}
-const syncHand = () => { if (!handTouched) $("hand").value = "seated"; };
+const syncHand = () => { if (!handTouched) $("hand").value = "standing"; };
 syncHand();
 $("hand").addEventListener("change", () => { handTouched = true; });
 $("clarify").addEventListener("change", () => {
@@ -569,11 +602,21 @@ document.addEventListener("keydown", e => { if (e.key === "Escape") stop(); });
 
 $("ask").addEventListener("submit", e => {
   e.preventDefault();
-  return send($("text").value);
+  return startRequest();
 });
 
 // Send the box text (or a tapped option): a new request, or the answer to the pending question.
-$("go").addEventListener("click", () => { endConversation(); return send("phone", true); });
+function startRequest() {
+  const distance = Number($("distance").value);
+  if (!Number.isFinite(distance) || distance <= 0 || distance > 20) {
+    $("reply").textContent = "Enter a distance greater than 0 and up to 20 feet."; $("distance").focus(); return;
+  }
+  if ($("object").value !== "phone") {
+    $("reply").textContent = "Choose Phone before starting."; $("object").focus(); return;
+  }
+  endConversation(); return send("phone", true);
+}
+$("go").addEventListener("click", startRequest);
 
 async function send(raw, direct = false) {
   const text = raw.trim(); if (!text) return;
@@ -589,11 +632,12 @@ async function send(raw, direct = false) {
   const sent = answering ? {text: convo.text, dialog: [...convo.dialog, {question: convo.pending, answer: text}]}
                          : {text, dialog: []};
   const hand = $("hand").value;
-  const payload = clarify ? {text: sent.text, hand, clarify: true, dialog: sent.dialog}
-                          : {text: sent.text, hand: hand || "seated"};
+  const payload = direct ? {item: $("object").value, hand: hand || "standing", distance_ft: Number($("distance").value)}
+                  : clarify ? {text: sent.text, hand, clarify: true, dialog: sent.dialog}
+                          : {text: sent.text, hand: hand || "standing"};
   asking = true; setAskBusy(); $("reply").textContent = "…";
   try {
-    const r = await call("/request", {method: "POST", headers: {"Content-Type": "application/json"},
+    const r = await call(direct ? "/fetch" : "/request", {method: "POST", headers: {"Content-Type": "application/json"},
                                       body: JSON.stringify(payload)}, 30000);
     if (!r.ok || !r.body || !r.body.parsed) {
       const detail = r.body && typeof r.body.detail === "string" ? `: ${r.body.detail}` : "";
@@ -662,9 +706,10 @@ async function refresh() {
 // The tutorial never activates a target control or sends a fetch request.
 const TOUR_STEPS = [
   {target:null, title:"Welcome, let’s help you use Floor Picker", text:"A quick tour of choosing your item, setting your hand-off height and staying in control."},
-  {target:"go", title:"This is your object option", text:"Phone is the item Floor Picker can find and bring to you. This is where you choose what you dropped."},
+  {target:"distance", title:"About how far away?", text:"Type an estimate in feet, such as 3.5. This caps estimated wheel travel, including turns. At the limit the robot stops and checks the camera; it won’t drive farther or return on its own."},
+  {target:"object", title:"Choose your object", text:"Select Phone from this list. Choosing an object won’t start the robot."},
   {target:"hand", title:"Choose your hand-off height", text:"Choose Seated or Standing to tell Floor Picker how you’d like the item handed to you. Set this before starting your request."},
-  {target:"go", title:"Tap Phone to get started", text:"Once your height is set, click or tap Phone to start the request. Just looking at this tutorial won’t start anything."},
+  {target:"go", title:"Start when you’re ready", text:"With distance, Phone and hand-off height set, tap Start request. The camera guides the approach within your estimate. This tutorial never starts motion."},
   {target:"stop", title:"You can stop at any time", text:"Watch Mission status to follow along. Hit STOP whenever you need to stop motion and hold the arm. You can also press Esc."}
 ];
 let tourIndex = -1, tourFrame = null, tourUntil = 0, tourReturnFocus = null;

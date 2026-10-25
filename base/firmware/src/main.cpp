@@ -49,6 +49,7 @@ void loop() {
     const uint32_t now = millis();
     const bool emergency = wiring::confirmed && wiring::estop_sense >= 0 &&
         (digitalRead(wiring::estop_sense) == (wiring::estop_active_low ? LOW : HIGH));
+    controller.wheel_steps(left.motor.steps, right.motor.steps, steps_per_mm);
     controller.tick(now, emergency);
     // Bound RX work per loop so an input flood cannot starve the watchdog.
     for (int n = 0; n < 32 && Serial.available(); ++n) {
@@ -83,5 +84,6 @@ void loop() {
         char status[96];
         snprintf(status, sizeof(status), "STAT %ld %ld 0 0 %d", long(left.motor.steps), long(right.motor.steps), int(emergency));
         reply(status);
+        if (controller.limit_reached) reply("LIMIT REACHED");
     }
 }

@@ -5,6 +5,7 @@ import argparse
 import copy
 from datetime import date
 import json
+import math
 from pathlib import Path
 import queue
 import threading
@@ -42,6 +43,10 @@ class Mission:
         self.period = period
         self.simulated = simulated
         self._base_status = None
+        self._limit_pending = None
+        self._limit_ready = True
+        self._boundary_started = None
+        self._boundary_frame = None
         self._lock = threading.Lock()  # Never held during file, serial or arm I/O.
         self._closed = threading.Event()
         self._wake_io = threading.Event()
@@ -105,7 +110,11 @@ class Mission:
         self._stop_ticket += 1
         self._wake_io.set()
 
-    def request(self, item, hand):
+    def request(self, item, hand, *, max_distance_ft=None):
+        if max_distance_ft is not None and (isinstance(max_distance_ft, bool) or
+                not isinstance(max_distance_ft, (int, float)) or
+                not math.isfinite(max_distance_ft) or not 0 < max_distance_ft <= 20):
+            raise ValueError("distance must be greater than 0 and at most 20 feet")
         if item not in self.config["items"] or hand not in ("seated", "standing"):
             raise ValueError("unsupported item or hand preset")
         with self._lock:
@@ -117,6 +126,11 @@ class Mission:
             self._token = threading.Event()
             self._generation += 1
             self._item = item
+            # A fresh budget is installed only after acknowledged STOP. Legacy calls
+            # also get a bounded default, so an old exhausted budget cannot leak.
+            self._limit_pending = (self._generation, (20 if max_distance_ft is None else max_distance_ft) * 304.8)
+            self._limit_ready = False
+            self._boundary_started = None
             self._seen = self._attempts = 0
             self._last_frame = None
             self._last_camera = self._last_seen = time.monotonic()
@@ -159,12 +173,20 @@ class Mission:
                 self._desired = None
                 generation = self._generation
                 cancelled = self._token.is_set()
+                pending_limit = self._limit_pending
             try:
                 if halt:
                     self.base.stop_and_wait()
                     self._event("serial", command="STOP")
                     with self._lock:
                         self._stop_completed = stop_ticket
+                elif pending_limit and pending_limit[0] == generation and not cancelled:
+                    self.base.set_travel_limit(pending_limit[1])
+                    with self._lock:
+                        if generation == self._generation and not self._token.is_set():
+                            self._limit_pending = None
+                            self._limit_ready = True
+                    self._event("serial", command="LIMIT", mm=pending_limit[1])
                 elif desired and desired[0] == generation and not cancelled:
                     self.base.drive(*desired[1])
                     self._event("serial", command="DRIVE", speeds=desired[1])
@@ -257,7 +279,35 @@ class Mission:
             if hasattr(self._navigator, "observe"):
                 age = float("inf") if self._last_frame is None else time.time() - self._last_frame[1]
                 self._navigator.observe(self._last_frame, age, self._base_status)
+            if self._state == "BoundaryCheck":
+                if not self._boundary_stopped and self._stop_completed >= self._stop_ticket:
+                    self._boundary_stopped = True
+                    self._boundary_started = time.time()
+                    self._boundary_frame = self._last_frame
+                    return
+                # Demand a frame captured after stopping, not a cached detection.
+                fresh = (self._boundary_stopped and self._last_frame is not None
+                         and self._last_frame != self._boundary_frame
+                         and self._last_frame[1] >= self._boundary_started
+                         and 0 <= time.time() - self._last_frame[1] <= .3)
+                if fresh or time.time() - self._boundary_started > 2:
+                    result = ("Item seen, but travel limit reached; reposition before another request"
+                              if fresh and self._detection else
+                              "Item not found at travel limit; reposition before another request" if fresh else
+                              "Travel limit reached; no fresh camera frame")
+                    self._token.set()
+                    self._state_to("Stopped", result)
+                return
             if self._state in ("Search", "Approach"):
+                if not self._limit_ready:
+                    return
+                if self.base.limit_reached:
+                    self._halt()
+                    self._boundary_started = time.time()
+                    self._boundary_frame = self._last_frame
+                    self._boundary_stopped = False
+                    self._state_to("BoundaryCheck", "Travel limit reached; stopped and checking camera")
+                    return
                 if self._base_status is None:
                     self._halt()
                     return
