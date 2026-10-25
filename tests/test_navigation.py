@@ -25,3 +25,11 @@ def test_real_parking_needs_matching_calibration_and_fresh_distinct_frames():
     assert nav.approach(detection) == (False, (0, 0))
     detection['bbox_px'] = [0, 0, 20, 20]
     assert nav.approach(detection) == (False, (0, 0))
+
+
+def test_invalid_navigation_is_rejected_before_hardware():
+    import pytest
+    cfg = yaml.safe_load((Path(__file__).parents[1] / 'config/robot.yaml').read_text())
+    cfg['navigation']['settle_frames'] = 0
+    with pytest.raises(ValueError):
+        RealNavigation(cfg, Map())
