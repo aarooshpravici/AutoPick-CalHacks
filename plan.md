@@ -226,11 +226,26 @@ This is a stretch goal. It is built only after G4, and only if everything else w
 - **The SO-101 claw is tested first (task A5, decision D1):** can it pick up a phone lying flat on the floor, face up and face down, with and without a case? It must also hold the phone at the present pose for 60 s and let it go when a person pulls.
 - If yes, add thin anti-slip fingertip pads (grip tape or printed TPU covers) and keep the claw.
 - If no, add a spring-mounted bellows suction cup beside the claw with a 12 V pump, a vent valve and a vacuum sensor ([section 12](#12-parts-list)). The phone pickup then becomes scripted: lower until the sensor reads sealed, then lift.
+- **Octobuddy finding (Sat 24 Oct, SW1):** an Octobuddy (a suction-cup phone holder) does stick to the phone, but whether it holds depends on the case. **Open question:** can it be fixed to the gripper, and does it still stick when the arm presses it onto the phone and lifts? Test this before relying on it for D1.
 - Keep anything mounted on the wrist light. Weigh the wrist camera together with its mount.
 
 ---
 
 ## 7. Electronics and power
+
+**Sat evening hardware update (issue #47, supersedes earlier wheel electronics):**
+Uno R4 WiFi controls four 5 V 28BYJ-48 geared steppers through four ULN2003-style
+boards. Each left driver shares IN1–IN4 signals from D8/D9/D10/D11; each right
+driver shares D2/D3/D4/D5. Motors take power from the 5 V buck rail, not GPIO or
+the Uno regulator. Common ground is required. The physical E-stop must remove
+motor power upstream of the buck as well as the arm's 12 V branch. No E-stop
+sense pin has been supplied; `STAT estop=0` is not proof the switch is released.
+Confirm the driver input order and wheel direction before enabling firmware.
+Wiring is unfinished and existing driver boards may be damaged: replacement
+boards and HW1's power check are prerequisites to energising/testing this setup.
+The older NEMA/TMC current estimates below do not describe these wheel motors;
+HW1 must verify the actual 5 V load and buck/driver ratings.
+
 
 ```mermaid
 flowchart LR
@@ -238,7 +253,7 @@ flowchart LR
     DB --> F1["Fuse 5 A"] --> ARMB["SO-101 follower<br/>bus servo board"]
     DB --> F2["Fuse 5 A"] --> CAP["470-1000 uF capacitor"] --> TMC["4 wheel motor drivers<br/>type: confirm with Darren<br/>a lift driver is stretch"]
     DB --> F3["Fuse 2 A"] --> PUMP["Pump + valve<br/>only if suction"]
-    DB --> F4["Fuse 1 A"] --> BUCK["Buck converter 12 V to 5 V"] --> ESPP["ESP32, LED<br/>HX711 (stretch)"]
+    DB --> F4["Fuse 1 A"] --> BUCK["Buck converter 12 V to 5 V"] --> ESPP["Arduino Uno R4 WiFi, LED<br/>HX711 (stretch)"]
     LEAD["SO-101 leader: own 5 V supply,<br/>stays off the robot"]
 ```
 
@@ -250,14 +265,14 @@ flowchart LR
 | 4 drive motors | About 0.5–1 A each if NEMA 17 steppers (estimate; confirm with Darren) |
 | Lift stepper (moving, stretch) | About 1 A |
 | Pump and valve (only if suction) | About 0.5 A |
-| ESP32 and sensors, via the buck converter | Small |
+| Arduino Uno R4 WiFi and sensors, via the buck converter | Small |
 | **Total** | **About 5–6 A peak** without the lift (about 6–7 A with it). Use a 10 A supply. |
 
 **Wiring rules**
 
-- **Common ground:** every board's ground returns to one point. The ESP32's step signals only work if the drivers share its ground.
+- **Common ground:** every board's ground returns to one point. The Arduino Uno R4 WiFi's step signals only work if the drivers share its ground.
 - **E-stop:** it cuts the 12 V, which stops the arm and wheels, and the lift if the stretch lift is built.
-- **Brownouts:** put the 470–1000 µF capacitor across the stepper drivers' input, and keep power wires short and thick. If the arm's servos still reset when the wheels start, give the arm its own supply.
+- **Brownouts:** put the 470–1000 µF capacitor across the ULN2003 driver boards' input, and keep power wires short and thick. If the arm's servos still reset when the wheels start, give the arm its own supply.
 - **Fuses:** one per branch, so one short doesn't take everything down.
 - **USB:** the RealSense gets its own USB 3 port on the Mac. Everything else goes through the powered hub.
 - **Battery:** stretch goal. If used, a 12 V pack of about 5 Ah lasts roughly 1.5–2.5 h (estimate). Check its fully charged voltage (a 3S LiPo reaches 12.6 V) against the servo and pump ratings. Let the TMC2209s cut current when standing still.
@@ -281,7 +296,7 @@ floor-picker/
 ├── training/               ACT: record, convert, train remotely, pull checkpoints   [SW1, env: lerobot]
 ├── perception/             RealSense, YOLO, floor mapping, hand height, publishers  [SW2 + SW1, env: perception]
 ├── base/
-│   ├── firmware/           ESP32 (PlatformIO, Arduino framework)                    [SW2]
+│   ├── firmware/           Uno R4 WiFi (PlatformIO, Arduino framework)                    [SW2]
 │   └── driver.py           Python side of the serial protocol                       [SW2, env: lerobot]
 ├── brain/                  mission state machine                                    [SW2, env: lerobot]
 ├── ui/                     FastAPI status page, STOP, request parser                [SW1, env: lerobot]
@@ -311,7 +326,7 @@ flowchart LR
     UI --> REQ --> BRAIN
     BRAIN <--> ARMM
     BRAIN <--> BASED
-    BASED <-->|"USB serial, 115200"| ESP32["ESP32 firmware"]
+    BASED <-->|"USB serial, 115200"| Uno R4 WiFi["Uno R4 WiFi firmware"]
     ARMM <-->|"USB, servo bus"| SO101["SO-101 follower"]
 ```
 
@@ -417,13 +432,31 @@ result = pick_to_tray(arm, poses, pan_deg=0.0, roll_deg=0.0, policy=None, speed_
 #            "grasp": "scripted" | "policy", "attempts": 1, "seconds": 14.2, "detail": "..."}
 ```
 
-Command line: `python -m arm.pick run [--to hand|tray] [--policy DIR] [--pan DEG] [--roll DEG] [--speed DEG_S] [--dry-run]`. The default is `--to hand`. The last printed line is `RESULT {json}`. Exit codes: 0 taken or in_tray, 1 error or stopped, 2 missed, 3 dropped, 4 stuck, 5 timeout.
+**Suction grasp (the flat-phone path, C5).** The claw can't get under a phone lying flat, so `pick_to_hand(..., grasp="suction")` uses a passive suction cup (an Octobuddy) instead: no pump, no vacuum sensor, and the claw is never moved (it stays at the gripper value taught in `suction_press`).
 
-### 9.5 Serial protocol (Mac ↔ ESP32, USB, 115200 baud, one command per line)
+```python
+result = pick_to_hand(arm, poses, grasp="suction", suction_dwell_s=2.0, suction_hold_s=4.0, speed_deg_s=45)
+# ready -> suction_above -> suction_press (at most 15 deg/s) -> dwell 2 s -> back up to
+# suction_above (15 deg/s) -> suction_lift -> suction_present (at most 25 deg/s)
+# -> timed hold 4 s -> ready
+```
+
+- **Poses:** `suction_above`, `suction_press`, `suction_lift`, `suction_present`, plus `ready`, taught with `python -m arm.teach --grasp suction`. They are merged into the existing `config/poses.json`, so the claw poses stay. A file with only these poses is valid for suction (`python -m arm.check --to suction`); the claw poses and claw values are not needed.
+- **The 4 s hold is timed.** Nothing can sense the pull, so after `suction_hold_s` the arm goes back to `ready` and reports `"taken"`. A cup that never stuck, a phone that fell off and a pull that never came all look the same. The `detail` says so ("no sensor, so the seal and the pull were not checked"); anything that must know has to check another way (the camera).
+- **`handoff_timeout_s` and `handoff_grip` belong to the claw** and are ignored. There is no policy or tray variant.
+- Command line: `python -m arm.pick run --grasp suction [--suction-dwell S] [--suction-hold S]`. `--dry-run` uses the sim's passive cup (`SimArm`: it sticks after `seal_after_s` of pressing, `--sim-miss N` makes the first N presses fail, `--sim-slip` drops it while lifting). The result's `grasp` is `"suction"`.
+
+Command line: `python -m arm.pick run [--to hand|tray] [--grasp claw|suction] [--policy DIR] [--pan DEG] [--roll DEG] [--speed DEG_S] [--dry-run]`. The default is `--to hand`. The last printed line is `RESULT {json}`. Exit codes: 0 taken or in_tray, 1 error or stopped, 2 missed, 3 dropped, 4 stuck, 5 timeout.
+
+### 9.5 Serial protocol (Mac ↔ Uno R4, USB, 115200 baud, one command per line)
 
 | Command from the Mac | Reply | Meaning |
 |---|---|---|
 | `PING` | `PONG` | Link check |
+| `INFO` | `INFO floorpicker-r4 2 limit=1 hold=1 watchdog_ms=300 wiring=0/1 estop_sense=0/1 max_mm_s=<n> config=<16-hex>` | Firmware identity/capabilities and fingerprint of compiled hardware settings; checked before real drive. |
+| CAN byte (`0x18`) | (none) | Immediately halt and discard a partial RX line without executing it; host follows with acknowledged STOP. |
+| `LIMIT <mm>` | `OK LIMIT` | Set a new estimated travel budget while fully stopped; finite, greater than zero, at most 6096 mm (20 ft). Required after boot before DRIVE. |
+| `LIMIT REACHED` (R4 → Mac) | (event) | Latched budget exhausted; wheels hold, further DRIVE is ignored until a new LIMIT. Repeated with STAT while latched. |
 | `DRIVE <left_mm_s> <right_mm_s>` | (none) | Wheel speeds. **Watchdog: the wheels stop if no DRIVE arrives for 300 ms.** |
 | `STOP` | `OK STOP` | Stop wheels and any fitted lift with quick deceleration; abandon the active lift move and hold its current height (REQ-codex-2) |
 | `LIFT_HOME` | `LIFT_HOMED` | Lower until the bottom switch, zero the position (stretch: lift) |
@@ -434,6 +467,10 @@ Command line: `python -m arm.pick run [--to hand|tray] [--policy DIR] [--pan DEG
 - **Status:** the ESP32 also sends `STAT <left_steps> <right_steps> <lift_mm> <tray_g> <estop>` every 100 ms.
 - **Errors:** sent as `ERR <text>`.
 - **Without the lift:** firmware replies `ERR no lift` to `LIFT_HOME`, `LIFT_TO`, `TRAY` and `TARE`, and `STAT` reports `lift_mm` and `tray_g` as 0.
+- **R4 connection:** acquire an exclusive serial lock, allow boot, cancel partial RX with CAN, acknowledge STOP, then verify INFO identity/configuration. Firmware UART replies do not use availableForWrite (the R4 UART inherits a zero return). Physical E-stop sensing is explicitly reported; absence of a sense input means STAT cannot confirm the switch.
+- **Drive readiness:** a new mission requires the arm within 5 degrees of taught ready on all unfrozen arm joints, with no pick thread active. The brain refuses instead of automatically retracting the arm. A phone outside the calibrated floor area fails immediately; `navigation.approach_progress_timeout_s: 10` stops an approach whose goal error fails to improve by 5 mm. These are not wheel encoders or physical traction verification.
+- **Travel budget (SW2 draft):** the form asks for feet, object and hand-off height. The Mac converts feet × 304.8 to mm, acknowledges STOP, then acknowledges LIMIT before driving. The R4 sums the mean absolute left/right issued half-step distance, including turns and reversals; STOP/watchdog do not reset it. The controller stops one half-step early to bound quantization. This is commanded wheel travel, not measured floor displacement; skid/slip and calibration affect physical accuracy. At the limit the brain waits for acknowledged STOP and a new camera frame (up to 2 seconds), reports seen/not-found/unavailable and stays stopped. No automatic turn, return or pickup at that point. Legacy text requests without an estimate receive a 20 ft budget. Older firmware rejects LIMIT and the mission fails closed. Review and deploy firmware/driver/brain together.
+- **Pickup reach (REQ-claude-14):** `navigation.pickup_max_distance_m: 0.33` adds a radial limit to measured parking. The provisional reference is the floor below the front camera, matching `floor_m`; verify its offset from SW1’s physical arm reference on the final robot. Reject a configured parking target outside this range.
 - **STOP and hold:** a fitted lift keeps its stepper enabled at its current height. An abandoned `LIFT_TO` does not later send `LIFT_AT`; only a new `LIFT_HOME` or `LIFT_TO` moves it again. The Mac cancels the outstanding lift wait after `OK STOP`. `ERR no lift` is a capability response, not a broken serial link.
 - **Brain STOP:** the page button or the word "stop" sends serial `STOP` and holds the arm (torque stays on), within 0.5 s. A physical E-stop instead cuts 12 V, so a belt lift can slide down; keep hands clear and provide a mechanical bottom stop or friction with HW2.
 - **Steps per mm, drive:** with a 72 mm wheel, 200 steps per turn and 8 microsteps, one step is about 0.14 mm.
@@ -453,9 +490,18 @@ parse_request("stop!")               # -> {"action": "stop", "item": None}
 
 ### 9.7 Status page (`ui/server.py`, FastAPI, port 8000)
 
+The integrated brain reads `handoff.grasp` (`claw`, default, or `suction`),
+`suction_dwell_s` (default 2, >0 through 10) and `suction_hold_s` (default 4,
+>0 through 60). Suction uses the matching suction poses/API from #54. Its timed
+completion is exposed as `last_pick.result: unverified` with `take_verified: false`,
+and Idle asks the person to visually confirm the pickup/take. The arm API's
+original result is not proof of a sensed seal or take. Speed/STOP caps are unchanged.
+
+
 | Route | Does |
 |---|---|
-| `GET /` | The page: text box, big STOP button, current state, small camera thumbnails |
+| `GET /` | The page: feet estimate, object selection, hand-off height, Start request, tutorial, big STOP button and current state |
+| `POST /fetch` | Structured form: `{"item":"phone","hand":"standing","distance_ft":3.5}`; positive finite feet, at most 20; no language parser |
 | `POST /request` | `{"text": "..."}`: parsed, then sent to the brain |
 | `POST /stop` | Stop everything |
 | `GET /status` | Brain state (state names include Present and WaitForTake), last detection, lift height and tray weight (`lift_mm` and `tray_g`, null without the lift), last pick result |
@@ -551,7 +597,9 @@ flowchart TD
 
 **Recording**
 
-- Record demos with `lerobot-record`, using the SO-101 follower and leader.
+- Record demos with `python -m training.record --run`, using the SO-101 follower and leader. It writes the LeRobot dataset `lerobot-record` would (same features: `observation.state` and `action` with all six joints, plus `observation.images.<cam>`), but records natively: `lerobot-record` builds the follower itself, so it would command the faulty wrist_roll servo (servo 5 browns out the bus; `robot.yaml` `arm.frozen_joints`), it jolts at start-up and it has no line-up gate. Without `--run`, `training/record.py` only prints the equivalent `lerobot-record` command, with a warning not to run it while a joint is frozen.
+- How `--run` works: the person confirms the area is clear; the leader, the webcams and then the follower open (`arm/real.py` RealArm: frozen servos never called, no jolt); the live line-up table (`arm/align.py`) runs before any follower command; the follower then copies the leader at the `robot.yaml` speed cap (`arm/teach.py` `follow_step`), and recording starts on Enter. A frozen joint is recorded as a constant in both state and action, never the leader's value, so the policy learns it never moves.
+- Keys, each followed by Enter: Enter ends a demo (and starts the next one early during the reset); `r` discards the demo in progress, or the one just finished during its reset, and records it again; `q` saves the finished demos and stops. During the reset (`--reset-time`) teleop goes on but nothing is recorded. Ctrl-C stops commanding at once, and the follower holds its pose with the torque on; saved demos are kept, and the unsaved one is discarded (also a finished one still in its reset). Saving a demo and finalizing the dataset can't be interrupted, so the files always match `meta/info.json`; if a save fails by itself, the dataset is marked broken and `--resume` refuses it. `--resume` adds demos to an existing dataset; without it an existing dataset is refused.
 - Each demo starts at `ready` and **ends the moment the claw is firmly closed on the object**. The scripted moves do the rest.
 - About 50 demos. Vary the object's position and angle across the parking error measured in task P4 (for example ±2 cm and a few angles), so ACT learns to correct for imprecise parking.
 
@@ -595,7 +643,20 @@ flowchart TD
 - Vary position, distance, angle and lighting. Include the phone face up, face down and in different cases, plus empty floor.
 - Label boxes in Roboflow, CVAT or Label Studio.
 
-**Training.** Fine-tune a nano YOLO model with Ultralytics on the PC GPU. At the venue, add about 50 photos of the actual floor and retrain briefly on top.
+**Training.** Fine-tune a YOLO model with Ultralytics, starting with nano (the fastest) at `imgsz=1280`. Train on the PC GPU, the Mac (`mps`, a few minutes for a small set), or Google Colab. At the venue, add about 50 photos of the actual floor and retrain briefly on top.
+
+**If nano can't find the phone.** Work up this ladder, one step at a time. Measure each step with the P3 check: live, 9 of 10 placements between 0.3 and 1.0 m, nothing on empty floor, and at least 10 detections a second on the robot Mac with everything else running.
+
+| Step | Change | Cost | Helps when |
+|---|---|---|---|
+| 1 | Nano at `imgsz=1280`, trained on low-mount photos with far phones | Baseline | — |
+| 2 | **More and better data:** far phones (0.75–1.0 m), venue floor, look-alikes as negatives | Photos and labels | Misses and false alarms of every kind |
+| 3 | **A bigger model:** small, then medium, at `imgsz=1280`; train on Colab or the PC, run on the Mac | Lower fps (measure it) | Far, thin phones are missed |
+| 4 | **Crop the floor band:** run the detector on the strip of the image where 0.6–1.0 m floor appears, at full resolution, and merge the boxes | A little code in `publish.py` | Far phones are too small in the full frame |
+| 5 | **Raise the front camera** to a post 25–35 cm up (6.3): the phone looks about 3× taller. ACT doesn't use this camera, so it can move after the arm demos; redo P4 and retake the YOLO photos | HW2 mount, new photos | Far phones stay under about 10 px tall |
+| 6 | **Limit the demo:** the phone within about 0.6–0.8 m, on a floor that contrasts with it | None | A last resort for the demo |
+
+Open-vocabulary detectors (YOLO-World, OWLv2) are not a fallback: they found almost none of the phones in the first photo set.
 
 **Publisher (`perception/publish.py`).** Runs the detector on each colour frame and sends the detection message (9.2), including `floor_m` from the floor mapping and `depth_m` from the aligned depth.
 
@@ -621,6 +682,8 @@ flowchart TD
 3. Stop when the phone is within `parking_tolerance_m`, or if it's lost for more than 1 s.
 4. Measure the parking precision (10 tries) and post it: ACT recording uses it.
 
+**Reach limit (Sat 24 Oct, SW1):** if the phone is more than about **13 in (33 cm)** away, the robot must drive closer before it tries to pick it up. Never start a pick from farther than that. (13 in is SW1's estimate of the arm's reach; measure it on the final base.)
+
 **Search (`brain/search.py`).** Turn in steps of about 30°, pausing to look, until the phone is seen with confidence ≥ 0.6 for 5 frames in a row. Give up after two full turns. With the low camera the phone has to be within about 1 m to be seen.
 
 **Done when** the robot parks within ±2–3 cm in 8 of 10 tries from 1 m away, and the scripted pick then succeeds from that parked position.
@@ -629,7 +692,9 @@ flowchart TD
 
 **Firmware (`base/firmware/`)**
 
-- **Platform:** ESP32 with drivers for four wheel motors, as left and right pairs: the two motors on a side get the same command, so `DRIVE <left> <right>` is unchanged. If they are steppers, use four TMC2209s, with the two drivers on each side sharing the step and direction pins. If they are DC motors, use H-bridge drivers instead, and STAT reports encoder counts (or 0 without encoders). Motor type: confirm with Darren (D10). The stretch lift adds its own driver, an HX711 and the bottom limit switch.
+- **Platform (issue #47):** Arduino Uno R4 WiFi (RA4M1) with four 28BYJ-48 5 V steppers, each on a ULN2003-style driver. Both motors on each side share the four coil signals: left D8–D11, right D2–D5. Nonblocking eight-phase half stepping; STOP and watchdog retain the last coil pattern to hold position while powered. Nominal 4096 half steps/output revolution is provisional and needs measurement.
+- **Geometry:** wheel diameter 71 mm, track 430 mm, wheelbase 305 mm (approximate HW1 values). Skid slip means commanded step counts are not measured travel.
+- **Limits:** start with a provisional 30 mm/s maximum, 30 mm/s² acceleration and 300 mm/s² STOP deceleration. Measure loaded speed and turning before raising limits; 28BYJ-48 torque may be inadequate. Configuration and pin map live in `robot.yaml`; `base/firmware/generate_config.py` generates the matching header. `wiring_confirmed` defaults false.
 - **Protocol:** implements 9.5 exactly.
 - **Watchdog:** the 300 ms wheel watchdog is mandatory.
 - **Acceleration:** limit wheel acceleration, and lift acceleration if the lift is built, so the robot doesn't rock.
@@ -686,6 +751,7 @@ stateDiagram-v2
 ```
 
 - **Loop and logging:** the brain runs a 10 Hz loop and logs every state change and message to `data/logs/<date>.jsonl`.
+- **No pick from too far:** Approach goes to Pick only when the item is within about 13 in (33 cm). Farther than that, keep approaching (10.4, reach limit).
 - **Attempt limit:** at most 3 full attempts per request (search to pick), then it reports `Failed`.
 - **Simulated components:** it accepts the simulated arm, the fake serial port and replayed detection logs, so the whole mission can run without hardware.
 - **Known limit:** if the object slips while presenting, it looks the same as "taken".
@@ -872,7 +938,7 @@ flowchart LR
 | D5 | Mast-top camera (stretch) | Normal or wide angle | SW1 + HW2 | Sit in the demo chair; check the hand stays in view at all tray heights. |
 | D6 | Deck material | Plywood, acrylic, 2020 frame | HW1 | What's available and quickest to cut. |
 | D7 | Power source | Tether or battery | HW1 | Tether for the event; battery only if everything else is done. |
-| D8 | Training backup | PC only, or PC + cloud GPU | SW1 | If the PC is busy at the event, book cloud time. |
+| D8 | Training backup | The PC, Google Colab, or the Mac | SW1 + SW2 | YOLO trains anywhere: Colab or the Mac are fine for a few hundred photos. ACT trains on the PC (`training/remote.sh`); if the PC is busy, use Colab with a notebook that installs the same pinned LeRobot commit as `requirements-lerobot.txt`. |
 | D9 | Grip while presenting | Full squeeze or light hold: `handoff.grip` in `robot.yaml`, `squeeze` or `light` (10.1). It stays `squeeze` until A5 decides. In `light` mode, taken = the claw closes at least 4 units from where it held the phone (or reaches the closed side) for 6 reads in a row. | SW1 | A5 pull test: can a seated person pull the phone out easily, and does it stay put for 60 s? |
 | D10 | Drive motors and turning | Stepper or DC motors; left/right pairs or four channels; keep the corner wheel spacing or shorten it | HW1 (Darren) + SW2 | Darren confirms the motors and wiring, and SW2 adapts B3. Then turn the base in place on serial: if it struggles or stalls, shorten the wheelbase or change the tyres. |
 
@@ -1215,6 +1281,7 @@ Requests for you:
 | Servos reset when the steppers start (brownout) | Low | High | Capacitor, short thick wires; separate supply for the arm |
 | The Mac struggles (depth alignment + YOLO + ACT + 3 cameras) | Medium | Medium | Turn off alignment; run YOLO slower; ACT only runs during the grasp |
 | The venue floor confuses the detector | Medium | Medium | P5 top-up with venue photos |
+| The detector misses far or flat phones from the low camera | High | High | The ladder in 10.3: more far-phone data, then a bigger model, then a floor-band crop, then raising the camera |
 | Wi-Fi or the API is down | Low | Low | Keyword fallback in the parser; STOP never needs the network |
 | The training PC is busy | Medium | Medium | Cloud GPU backup (D8) |
 | Behind schedule | High | High | Gates, the cut list (14.3), feature freeze at hour 30 |

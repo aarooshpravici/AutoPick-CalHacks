@@ -88,17 +88,28 @@ python -m arm.pick run --speed 25
 
 ## 6. 09:45: record the 50 demos (T4; SW2 parks the base)
 
-Print the command first, then record live. `--run` asks "area clear?" before the arm moves.
-
-```bash
-python -m training.record --name grasp_v1 --episodes 50
-```
+`--run` records natively: it never calls the frozen wrist_roll servo, has no start-up jolt, and lines the arms up before the follower moves. Without `--run` it only prints the equivalent `lerobot-record` command; don't run that, because it would command servo 5.
 
 ```bash
 python -m training.record --name grasp_v1 --episodes 50 --run
 ```
 
-- **Each demo:** starts at `ready` and **ends the moment the claw is firmly closed on the object**. The scripted moves do the rest.
+1. **Area clear?** Press Enter.
+2. **Line-up table:** the follower holds still. Move the leader until every joint shows ✓, then press Enter.
+3. **Before demo 1:** the follower now copies the leader, but nothing is recorded yet. Bring the leader to `ready`, place the object, and press Enter to start demo 1.
+4. **Each demo:** starts at `ready` and **ends the moment the claw is firmly closed on the object**: press Enter then (20 s at most). The scripted moves do the rest.
+5. **Reset (10 s):** the arm still follows, nothing is recorded. Move the object and bring the leader back to `ready`. Enter starts the next demo early.
+
+Keys, typed in the recording terminal and followed by Enter:
+
+- **`r`:** discards the demo in progress, or during its reset the one just finished, and records it again.
+- **`q`:** saves the finished demos and stops. A demo still in progress is not saved, so press Enter first to keep it.
+- **Ctrl-C:** stops now. The follower holds where it is; saved demos are kept and the unsaved one is dropped, including a finished demo still in its reset (`q` is the key that saves it). A demo that is being saved always finishes first, even if you press Ctrl-C again.
+- **A save failed** (for example, a full disk)? The dataset is marked broken (`RECORDING_BROKEN.txt`) and `--resume` refuses it. Record the remaining demos into a new `--name`.
+
+- **At the end:** the follower keeps holding its pose with the torque on. Rest it or hold it before you switch it off.
+- **Stopped part-way?** Add the rest with `--resume`, for example `python -m training.record --name grasp_v1 --episodes 20 --run --resume`. Without `--resume`, an existing dataset is refused.
+- **Too slow?** A demo recorded below 90% of 30 fps gets a warning; press `r` in its reset to drop it.
 - **Placement:** vary the object about ±2 cm and a few angles across the parking window, so ACT learns to correct for parking.
 - **Cameras:** record the wrist camera only. Leave out `--scene` unless D4 says otherwise: two-camera video encoding crashed once in testing.
 - **If the wrist webcam can't capture 320×180:** record with `--width 640 --height 360`, then convert:
@@ -109,11 +120,19 @@ python -m training.convert --src data/datasets/grasp_v1 --dst data/datasets/gras
 
 ## 7. 11:30: train on the PC (T5)
 
-Set the PC's address once per terminal. Check the GPU is free; `run` refuses if it's busy.
+The lab PC (RTX 5070 Ti, Ubuntu 22.04, shared account `keshav`) is reachable only from the university network, so turn on the university VPN at the venue. `remote.sh` uses its own folder, `~/floor-picker-train`, away from other projects. It checks the GPU is free and refuses to start over anyone's job. It never stores GitHub or Hugging Face tokens. Run these in a Terminal tab: Claude's sandboxed shell has no route to the PC.
 
 ```bash
-export FP_TRAIN_HOST=USER@PC-HOSTNAME
+export FP_TRAIN_HOST=keshav@10.193.169.55
 ```
+
+Check it's reachable first. If this times out, the VPN is off or the PC is asleep.
+
+```bash
+ssh -o BatchMode=yes -o ConnectTimeout=15 keshav@10.193.169.55 'nvidia-smi; command -v python3.12; git --version'
+```
+
+`setup` needs `python3.12` and `git` on the PC. Ubuntu 22.04 ships Python 3.10, so if `python3.12` is missing, tell Claude.
 
 ```bash
 training/remote.sh setup

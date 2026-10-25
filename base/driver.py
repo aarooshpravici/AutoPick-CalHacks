@@ -50,6 +50,7 @@ class BaseDriver:
         self._write_lock = threading.Lock()
         self._replies = deque(maxlen=128)
         self._status = None
+        self.limit_reached = False
         self._fault = None
         self._lift_blocked = False
         self._stop_generation = 0
@@ -67,11 +68,12 @@ class BaseDriver:
         max_lift = max(lift["seated_hand_mm"], lift["standing_hand_mm"])
         if fake:
             port = FakeSerial(max_speed_mm_s=base["max_speed_mm_s"], max_lift_mm=max_lift,
-                              wheel_diameter_mm=base["wheel_diameter_mm"])
+                              wheel_diameter_mm=base["wheel_diameter_mm"],
+                              steps_per_rev=base.get("half_steps_per_rev", 1600), config=base)
         else:
             import serial
             port = serial.Serial(base["serial_port"], baudrate=base["baud"],
-                                 timeout=0.05, write_timeout=0.1)
+                                 timeout=0.05, write_timeout=0.1, exclusive=True)
         return cls(port, max_speed_mm_s=base["max_speed_mm_s"], max_lift_mm=max_lift,
                    timeout=timeout)
 
@@ -96,6 +98,10 @@ class BaseDriver:
                                                   finite(fields[3]), finite(fields[4]),
                                                   fields[5] == "1", time.monotonic())
                         else:
+                            if line == "LIMIT REACHED":
+                                self.limit_reached = True
+                            if line == "OK LIMIT":
+                                self.limit_reached = False
                             if line == "OK STOP":
                                 self._stop_acked += 1
                             if line.startswith("ERR ") and line != "ERR no lift":
@@ -125,7 +131,7 @@ class BaseDriver:
         if self._closed.is_set():
             raise RuntimeError("serial driver closed")
         if self._fault is not None:
-            raise RuntimeError("serial link failed; reconnect before continuing") from self._fault
+            raise RuntimeError(f"serial link failed: {self._fault}; reconnect before continuing") from self._fault
 
     def _request(self, command, matches):
         # Single outstanding request because the frozen protocol has no request IDs.
@@ -172,6 +178,63 @@ class BaseDriver:
                     raise TimeoutError("no STAT received")
                 self._condition.wait(remaining)
 
+    def fresh_status(self, *, after, timeout=.4):
+        deadline = time.monotonic() + timeout
+        with self._condition:
+            while True:
+                self._healthy()
+                if self._status is not None and self._status.received_at > after:
+                    return self._status
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("no fresh STAT received")
+                self._condition.wait(remaining)
+
+    def synchronize(self, timeout=.4):
+        """Cancel partial RX text and halt, then require a fresh STOP acknowledgment."""
+        self._send("\x18")
+        self.stop_and_wait(timeout=timeout)
+
+    def firmware_info(self):
+        reply = self._request("INFO", lambda reply: reply.startswith("INFO "))
+        try:
+            tag, family, version, *tokens = reply.split()
+            fields = dict(token.split("=", 1) for token in tokens)
+            if family != "floorpicker-r4" or version != "2" or len(fields) != len(tokens):
+                raise ValueError("unexpected firmware identity")
+            if fields['limit'] != '1' or fields['hold'] != '1' or fields['watchdog_ms'] != '300':
+                raise ValueError("required LIMIT/hold/watchdog capabilities missing")
+            if fields['wiring'] not in ('0','1') or fields['estop_sense'] not in ('0','1'):
+                raise ValueError("invalid firmware flags")
+            if len(fields['config']) != 16 or any(c not in '0123456789abcdef' for c in fields['config']):
+                raise ValueError("invalid firmware configuration fingerprint")
+            speed = finite(fields['max_mm_s'])
+            if not 0 < speed <= 50:
+                raise ValueError("invalid firmware speed cap")
+            return dict(family=family, version=int(version), limit=True, hold=True,
+                        watchdog_ms=300, wiring=fields['wiring']=='1',
+                        estop_sensed=fields['estop_sense']=='1', max_speed_mm_s=speed,
+                        config_id=fields['config'])
+        except (ValueError, KeyError) as error:
+            raise RuntimeError(f"incompatible R4 INFO: {error}") from error
+
+    def verify_firmware(self, base, *, require_ready=True):
+        from base.firmware.generate_config import config_id
+        info = self.firmware_info()
+        if info['config_id'] != config_id(base):
+            raise RuntimeError("R4 firmware configuration differs from robot.yaml; regenerate/review/reflash together")
+        if not math.isclose(info['max_speed_mm_s'], float(base['max_speed_mm_s']), rel_tol=1e-6, abs_tol=.0005):
+            raise RuntimeError("R4 speed cap differs from robot.yaml")
+        if require_ready and not info['wiring']:
+            raise RuntimeError("R4 motor outputs disabled: wiring has not been confirmed in installed firmware")
+        return info
+
+    def set_travel_limit(self, mm):
+        mm = finite(mm)
+        if not 0 < mm <= 6096:
+            raise ValueError("travel limit must be greater than 0 and at most 6096 mm")
+        self._request(f"LIMIT {mm:.6f}", lambda reply: reply == "OK LIMIT")
+
     def ping(self):
         self._request("PING", lambda reply: reply == "PONG")
 
@@ -193,6 +256,20 @@ class BaseDriver:
             self._stop_generation += 1
             self._send("STOP")
             self._condition.notify_all()
+
+    def stop_and_wait(self, timeout=.4):
+        """Wait for firmware's stopped acknowledgment without blocking UI callers."""
+        deadline = time.monotonic() + timeout
+        with self._condition:
+            self.stop()
+            ticket = self._stop_generation
+            while self._stop_acked < ticket:
+                self._healthy()
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    self._fault = TimeoutError("STOP acknowledgment missing")
+                    raise self._fault
+                self._condition.wait(remaining)
 
     def lift_home(self):
         self._lift_blocked = True
@@ -250,8 +327,9 @@ class FakeSerial:
     verifies protocol behavior, not lift mechanics or electrical safety.
     """
     def __init__(self, *, max_speed_mm_s=200, max_lift_mm=1000, wheel_diameter_mm=72,
-                 clock=time.monotonic, has_lift=False, lift_speed_mm_s=None):
+                 clock=time.monotonic, has_lift=False, lift_speed_mm_s=None, steps_per_rev=1600, config=None):
         self.clock = clock
+        self.config = config
         self.max_speed = max_speed_mm_s
         self.max_lift = max_lift_mm
         self.has_lift = has_lift
@@ -261,9 +339,12 @@ class FakeSerial:
         self.lift_target = None
         self.lift_enabled = False
         self._homing = False
-        self.steps_per_mm = 1600 / (math.pi * wheel_diameter_mm)
+        self.steps_per_mm = steps_per_rev / (math.pi * wheel_diameter_mm)
         self.left = self.right = self.lift_mm = self.weight = 0.0
         self.left_steps = self.right_steps = 0.0
+        self.travel_budget = None
+        self.travel_used = 0.0
+        self.limit_reached = False
         self.estop = False
         self.homed = False
         self.closed = False
@@ -277,8 +358,17 @@ class FakeSerial:
         now = self.clock()
         elapsed = max(0, now - self.last_update)
         moving_dt = max(0, min(now, self.last_drive + WATCHDOG_S) - self.last_update)
+        speed = (abs(self.left) + abs(self.right)) / 2
+        if self.travel_budget is not None and speed:
+            moving_dt = min(moving_dt, max(0, self.travel_budget - self.travel_used) / speed)
+            self.travel_used += speed * moving_dt
         self.left_steps += self.left * moving_dt * self.steps_per_mm
         self.right_steps += self.right * moving_dt * self.steps_per_mm
+        if self.travel_budget is not None and self.travel_used >= self.travel_budget:
+            if not self.limit_reached:
+                self._lines.append(b"LIMIT REACHED\n")
+            self.limit_reached = True
+            self.left = self.right = 0
         self.last_update = now
         if now - self.last_drive >= WATCHDOG_S or self.estop:
             self.left = self.right = 0.0
@@ -316,8 +406,25 @@ class FakeSerial:
             parts = command.split()
             reply = None
             try:
-                if parts == ["PING"]:
+                if parts == ["\x18"]:
+                    self.left = self.right = 0
+                elif parts == ["INFO"]:
+                    if self.config is None:
+                        reply = "ERR INFO unavailable in this fake configuration"
+                    else:
+                        from base.firmware.generate_config import config_id
+                        cfg = self.config
+                        reply = (f"INFO floorpicker-r4 2 limit=1 hold=1 watchdog_ms=300 "
+                                 f"wiring={int(cfg['wiring_confirmed'])} estop_sense={int(cfg['estop_sense_pin'] >= 0)} "
+                                 f"max_mm_s={cfg['max_speed_mm_s']:g} config={config_id(cfg)}")
+                elif parts == ["PING"]:
                     reply = "PONG"
+                elif len(parts) == 2 and parts[0] == "LIMIT":
+                    mm = finite(parts[1])
+                    if not 0 < mm <= 6096 or self.left or self.right:
+                        raise ValueError("invalid travel limit")
+                    self.travel_budget, self.travel_used, self.limit_reached = mm, 0, False
+                    reply = "OK LIMIT"
                 elif parts == ["STOP"]:
                     self.left = self.right = 0
                     self.lift_target = None  # Keep enable and current height: hold.
@@ -342,7 +449,10 @@ class FakeSerial:
                     left, right = finite(parts[1]), finite(parts[2])
                     if max(abs(left), abs(right)) > self.max_speed or self.lift_mm != 0 or self.lift_target is not None:
                         raise ValueError("unsafe drive")
-                    self.left, self.right, self.last_drive = left, right, self.clock()
+                    if self.limit_reached:
+                        reply = "LIMIT REACHED"
+                    else:
+                        self.left, self.right, self.last_drive = left, right, self.clock()
                 else:
                     raise ValueError("unknown or disabled command")
             except ValueError as error:

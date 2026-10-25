@@ -319,7 +319,8 @@ def test_typed_stop_during_parse_drops_the_request(brain):
         assert c.get("/status").json()["state"] == "Stopped"
 
 
-def test_stop_racing_brain_request_still_wins():
+@pytest.mark.parametrize("direct", [False, True])
+def test_stop_racing_brain_request_still_wins(direct):
     class SlowRequestBrain(RecordingBrain):
         def __init__(self):
             super().__init__()
@@ -332,13 +333,15 @@ def test_stop_racing_brain_request_still_wins():
 
     brain = SlowRequestBrain()
     with TestClient(create_app(brain, parse=offline_parse)) as c:
-        t, result = in_thread(lambda: c.post("/request", json={"text": "my pen fell"}))
+        endpoint = "/fetch" if direct else "/request"
+        payload = {"item": "phone"} if direct else {"text": "my pen fell"}
+        t, result = in_thread(lambda: c.post(endpoint, json=payload))
         assert brain.entered.wait(5)
         c.post("/stop")
         brain.release.set()
         t.join(10)
         assert result["value"].json()["dropped"] == "stopped"
-        assert brain.calls[-2:] == [("request", "pen", "standing"), ("stop",)]
+        assert brain.calls[-2:] == [("request", "phone" if direct else "pen", "standing"), ("stop",)]
         assert c.get("/status").json()["state"] == "Stopped"
 
 
@@ -517,6 +520,7 @@ def test_page_uses_the_parsers_stop_words():
     "stop_with_no_answer_fails_after_2_s",
     "ask_server_error_is_not_reported_as_no_connection",
     "ask_is_blocked_while_a_request_is_pending",
+    "phone_button_sends_structured_fetch_without_parser",
     "typed_stop_goes_to_stop_even_while_a_request_is_pending",
     "dropped_request_is_reported",
     "only_one_status_request_at_a_time",
@@ -648,3 +652,31 @@ def test_main_modes_are_exclusive_and_help_works(capsys):
         server.main(["--help"])
     assert e.value.code == 0
     assert "--real" in capsys.readouterr().out
+
+
+def test_object_dropdown_contains_selectable_phone():
+    from html.parser import HTMLParser
+    from ui.server import PAGE
+
+    class Options(HTMLParser):
+        in_objects = False
+        values = []
+        def handle_starttag(self, tag, attrs):
+            attrs = dict(attrs)
+            if tag == 'select':
+                self.in_objects = attrs.get('id') == 'object'
+            if tag == 'option' and self.in_objects:
+                self.values.append(attrs.get('value'))
+        def handle_endtag(self, tag):
+            if tag == 'select':
+                self.in_objects = False
+
+    parser = Options()
+    parser.feed(PAGE)
+    assert parser.values == ['', 'phone', 'sock']
+
+
+def test_structured_sock_request(client, brain):
+    response = client.post("/fetch", json={"item": "sock", "hand": "standing"})
+    assert response.status_code == 200
+    assert response.json()["parsed"]["item"] == "sock"

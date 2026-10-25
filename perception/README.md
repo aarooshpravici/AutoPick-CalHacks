@@ -77,3 +77,171 @@ Report the result on issue #1. S4 is **not complete** until this captures a real
 frame on the robot Mac. P1 subsequently supplies the reusable reader, alignment,
 flip, snapshot, preview, and performance checks. Do not treat this smoke check
 as P1's 25+ fps acceptance test.
+
+## P3 phone detector and publisher
+
+The trained checkpoint is already present on SW2's Mac. Copy it to the stable
+runtime location; both paths stay ignored by git. Do not retrain it for this step.
+
+```sh
+mkdir -p data/models
+cp -n data/runs/phone_v2/weights/best.pt data/models/phone_v2.pt
+```
+
+`perception.detector_weights` resolves relative to the repository root (or may
+be absolute); `perception.detector_conf` defaults to 0.5. Inference uses imgsz
+1280. The publisher targets 15 Hz, but actual throughput depends on inference;
+the listener measures received messages. This model only identifies `phone`.
+
+No-hardware smoke check (no model imports, no weights and no SDK):
+
+```sh
+.venv/perception/bin/python -m perception.publish --fake --count 30
+```
+
+Fake mode sends a synthetic phone box with synthetic depth and null floor
+coordinates. Never use fake output as detector or parking acceptance evidence.
+
+For the live check, leave the D435 fixed at the training mount height/tilt and
+on its own USB 3 port. Close other camera programs and any process listening on
+5601 (including the brain). This reader selects the RealSense SDK device, never
+an OpenCV index or the built-in Mac camera. **The person runs this command** in
+terminal A from the repository root and types their password:
+
+```sh
+sudo .venv/perception/bin/python -m perception.publish --device mps
+```
+
+To see the colour camera while detecting, stop the running publisher with
+Ctrl-C, then restart it with `--preview`:
+
+```sh
+sudo .venv/perception/bin/python -m perception.publish --device mps --preview
+```
+
+The window shows the same boxes sent over UDP, with class, confidence and pixel
+height. Click the window and press Q or Esc to quit (Ctrl-C in the terminal also
+works). It uses the publisher's existing camera stream, so do not start a second
+camera program. Preview also works with `--fake` without hardware or sudo.
+
+If startup reports `UVC device is already opened`, close other camera apps and
+capture scripts, then unplug/replug the D435 on its own USB 3 port and retry
+one publisher. The reader now cleans up failed startup attempts and creates a
+fresh pipeline for each retry. Each original startup error is printed, so if
+it still fails, include the first error as well as the final traceback.
+`floor mapping=False` is expected before P4 and does not prevent video.
+
+In terminal B, place the phone and run a five-second labelled measurement:
+
+```sh
+.venv/perception/bin/python -m perception.listen --placement 0.3m-left
+```
+
+Repeat with labels `0.3m-centre`, `0.3m-right`, `0.5m-left`, `0.5m-centre`,
+`0.5m-right`, `0.75m-left`, `0.75m-centre`, `0.75m-right`, `1.0m-left`,
+`1.0m-centre`, `1.0m-right`, then `empty` (phone removed). Keep it still during
+each measurement. Press Ctrl-C in terminal A when finished. The listener prints
+messages and a SUMMARY with detection-frame count, maximum confidence, mean
+pixel height and received Hz. Raw messages and summaries append to
+`data/logs/p3-live.jsonl`; placement labels preserve misses and empty-floor false
+positives too. Report all placements (at least 90% detected), no empty-floor
+detections and >=10 Hz; do not select only favourable trials. Same-session
+validation metrics are not this live acceptance check.
+
+Depth is the median of positive finite aligned depth samples in the clipped
+box, in metres, or null when unavailable. `floor_m` stays null until P4 supplies
+`config/floor_homography.json` alongside the selected robot config:
+
+```json
+{"matrix": [[1,0,0],[0,1,0],[0,0,1]], "colour_size": [1280,720], "flip": false}
+```
+
+The example matrix is **only a schema example**, not a calibration. P4 must
+replace it with a measured pixel-to-metre matrix: x forward, y left from the
+floor below the camera. The box bottom-centre is mapped. Size/flip mismatch
+fails startup; moving the camera requires recalibration even at the same size.
+If distant phones fail, report the placement table and request additional far
+phone/venue/empty-floor data using plan 10.3's fallback ladder; do not retrain
+automatically.
+
+## P4: measure the floor and pickup target (issue #47)
+
+The camera is reported mounted at 7–8 cm, but tilt/visibility and SW1's pickup
+position still need confirmation. Calibration only makes sense after both are
+fixed. Stop all other camera programs. No tool here moves the arm or base.
+
+1. Generate seven printable 10 cm ArUco markers (DICT_4X4_50):
+   `.venv/perception/bin/python -m perception.calibrate_floor markers`
+   Print SVGs at actual size; verify the black square is 100 mm with a ruler.
+2. Mark the floor origin directly below the front camera. Measure x forward and
+   y left in metres. Lay markers 0–3 around the operating area, including the
+   near pickup area; their centres must surround the points where parking will
+   be used. Put independent check markers 4–6 inside that area. All markers lie
+   flat on the same floor plane; do not infer distances from depth or the photo.
+3. Edit `data/calibration/markers/layout.json`: enter each measured marker-centre
+   `[x,y]` and a `mount_note` with camera height/tilt and mounting description.
+   Null placeholders deliberately prevent fitting invented geometry.
+4. With the RealSense connected, run the camera-only collector:
+
+   ```sh
+   sudo .venv/perception/bin/python -m perception.calibrate_floor collect --layout data/calibration/markers/layout.json
+   ```
+
+   SPACE records a frame where all seven marker IDs are visible; Q cancels.
+   Alternatively use `--image PATH` on an existing P1 colour snapshot without
+   sudo. Keep the same resolution and flip as robot.yaml.
+5. Fit with four points and verify on the other three:
+
+   ```sh
+   .venv/perception/bin/python -m perception.calibrate_floor fit --observations data/calibration/floor_observations.json
+   ```
+
+   It only writes `config/floor_homography.json` if every check is within 2 cm.
+   A failed check means recheck measurements/detection/mount/lens distortion;
+   don't adjust check labels merely to make the fit pass. The report stores
+   errors and all correspondences, not just a passing flag. Existing calibration
+   is protected unless `--replace` is explicit; replacements are backed up.
+6. SW1 establishes the phone pose the gripper can actually pick, with the base
+   stationary. Run the detector, record that box's **bottom-centre pixel**
+   `u=(x1+x2)/2, v=y2` from its UDP message, then run:
+
+   ```sh
+   .venv/perception/bin/python -m perception.calibrate_floor parking --pixel U V
+   ```
+
+   This writes the mapped target into the calibration and updates only the
+   existing `perception.parking_spot_floor_m` line in robot.yaml, backing up both.
+   The target is the detector's box reference point, not necessarily the phone's
+   physical centre. Repeat checks for orientation/case changes, and other objects.
+
+Do not commit measured calibration, photos or logs. Archive them under ignored
+`data/calibration/` for transfer to the robot Mac. Any camera movement invalidates
+P4 even if resolution/flip are unchanged. P4 schema approval is requested in
+REQ-codex-6; physical acceptance and the pickup target remain pending.
+
+### Phone, remote and sock model (issue #47)
+
+The active checkpoint is still phone-only. No sock/remote training is claimed.
+Collect at least 100 training images each of a remote and 2–3 different socks,
+plus a separate validation capture session, using the final connected D435 mount.
+Include several floor textures, object orientations, ranges and empty-floor images.
+Label tight boxes in class order `phone: 0`, `remote: 1`, `sock: 2`. Remap imported
+labels to this order. Use `images/train`, `images/val`, matching `labels` folders,
+and explicit empty label files for negatives. Keep adjacent burst frames in the
+same split; the audit catches exact duplicates, not near-duplicate images.
+
+Create a local dataset YAML with `path`, `train: images/train`, `val: images/val`
+and `names: [phone, remote, sock]`, then run from the repository root:
+
+```sh
+.venv/perception/bin/python -m perception.dataset data/datasets/objects/data.yaml
+.venv/perception/bin/python -m perception.dataset data/datasets/objects/data.yaml --train
+```
+
+Training refuses missing classes, invalid boxes, exact train/validation leakage,
+insufficient remote/sock training images and an existing run name. It writes a new
+`data/runs/objects_v1` checkpoint and leaves the phone checkpoint active. Review
+held-out per-class results and run the placement table for every class before
+changing `perception.detector_weights` or enabling extra `items` in robot.yaml.
+Use `perception.listen --label sock --placement 0.5m-left` (or `remote`) for those
+checks; retain separate empty-floor trials. Do not commit photos or checkpoints.

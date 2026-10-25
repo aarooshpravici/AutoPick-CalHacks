@@ -196,3 +196,163 @@ def test_ui_routes_use_real_mission_stop_and_status(make):
         assert response.json()['brain_ms'] < 50
         assert client.get('/status').json()['state'] == 'Stopped'
         assert client.get('/thumb/wrist').status_code == 404
+
+
+def test_missing_stop_ack_prevents_pick(make):
+    class NoAck(FakeSerial):
+        def write(self, data):
+            result = super().write(data)
+            with self._lock:
+                self._lines = type(self._lines)(line for line in self._lines if line != b'OK STOP\n')
+            return result
+    called = []
+    brain = make(port=NoAck(), pick=lambda *a, **k: called.append(True))
+    brain.request('phone', 'seated')
+    wait_for(lambda: brain._io_error)
+    assert not called
+    assert brain.status()['state'] == 'Failed'
+    # Teardown can report the intentionally failed serial link.
+    brain._io_error = None
+
+
+def test_real_gate_does_not_connect_with_unmeasured_base(config, monkeypatch):
+    import arm.real
+    monkeypatch.setattr(arm.real, 'RealArm', lambda *a, **k: pytest.fail('opened arm'))
+    config['base']['wiring_confirmed'] = True
+    with pytest.raises(RuntimeError, match='loaded-drive'):
+        build(config, sim=False)
+
+
+def test_old_firmware_rejects_budget_before_any_drive(make):
+    class OldFirmware(FakeSerial):
+        def write(self, data):
+            if data.startswith(b'LIMIT '):
+                with self._lock:
+                    self.commands.append(data.decode().strip())
+                    self._lines.append(b'ERR invalid command\n')
+                return len(data)
+            return super().write(data)
+    port = OldFirmware()
+    brain = make(port=port)
+    brain.request('phone', 'standing', max_distance_ft=3.5)
+    wait_for(lambda: brain.status()['state'] == 'Failed')
+    assert 'LIMIT 1066.800000' in port.commands
+    assert not any(c.startswith('DRIVE ') for c in port.commands)
+    with pytest.raises(RuntimeError, match='STOP FAILED'):
+        brain.close()  # Fault remains visible; resources still close in finally.
+
+
+def test_boundary_camera_timeout_stays_stopped(make):
+    port = FakeSerial()
+    class FrozenAtBoundary(FakeDetections):
+        def poll(self):
+            return None if port.limit_reached else super().poll()
+    brain = make(port=port, source=FrozenAtBoundary())
+    brain.request('phone', 'standing', max_distance_ft=.0001)
+    wait_for(lambda: brain.status()['state'] == 'Stopped', timeout=4)
+    assert 'no fresh camera frame' in brain.status()['message']
+    assert brain.status()['last_pick'] is None
+    count = len(port.commands)
+    time.sleep(.15)
+    assert not any(c.startswith('DRIVE ') for c in port.commands[count:])
+
+
+def test_suction_mission_runs_cup_and_does_not_claim_verified_take(config, make):
+    config['handoff']['grasp'] = 'suction'
+    brain = make()
+    brain.request('phone', 'standing', max_distance_ft=3)
+    result = wait_for(lambda: brain.status()['last_pick'])
+    assert result['result'] == 'unverified'
+    assert result['take_verified'] is False
+    assert brain.arm.object == 'hand'
+    assert 'visually confirm' in brain.status()['message']
+
+
+@pytest.mark.parametrize('key,value', [('grasp', 'unknown'), ('suction_hold_s', float('nan')),
+                                      ('suction_dwell_s', -1), ('suction_hold_s', 61)])
+def test_grasp_settings_refuse_bad_values(config, key, value):
+    from brain.mission import grasp_settings
+    config['handoff']['grasp'] = 'suction'
+    config['handoff'][key] = value
+    with pytest.raises(ValueError):
+        grasp_settings(config)
+
+
+def test_reapproach_requires_new_stop_before_pick(make):
+    # After one acknowledged parking stop, force another approach. The next pick
+    # must wait for a NEW stop, not reuse the prior stop's ticket.
+    slot = {}
+    class Navigation:
+        phase = 0
+        def search(self): return False, (0, 0)
+        def approach(self, detection):
+            brain = slot['brain']
+            if self.phase == 0 and brain._parking_stop_ticket is not None and brain._stop_completed >= brain._parking_stop_ticket:
+                self.phase = 1
+                return False, (10, 10)
+            if self.phase == 1:
+                self.phase = 2
+                slot['prior_stops'] = brain._stop_completed
+            return True, (0, 0)
+    def pick(*args, **kwargs):
+        assert slot['brain']._stop_completed > slot['prior_stops']
+        return dict(result='taken')
+    brain = make(navigator_factory=Navigation, pick=pick)
+    slot['brain'] = brain
+    brain.request('phone', 'standing')
+    result = wait_for(lambda: brain.status()['last_pick'])
+    assert result['result'] == 'taken', result
+
+
+@pytest.mark.parametrize('change,match', [
+    ('flags', 'P4'), ('frozen', 'wrist_roll'), ('port', 'arm port'), ('cap', 'safety limit')])
+def test_real_startup_rejects_dangerous_config_before_opening_devices(config, change, match):
+    config['base'].update(wiring_confirmed=True, drive_calibrated=True, serial_port='/dev/cu.R4')
+    if change == 'flags': config['base']['wiring_confirmed'] = 'false'
+    if change == 'frozen': config['arm'].pop('frozen_joints')
+    if change == 'port': config['base']['serial_port'] = config['arm']['follower_port'].replace('/dev/tty.', '/dev/cu.')
+    if change == 'cap': config['arm']['max_relative_target_deg'] = float('nan')
+    with pytest.raises(RuntimeError, match=match):
+        build(config, sim=False)
+
+
+@pytest.mark.parametrize('grasp,mode', [('claw','hand'), ('suction','suction')])
+def test_real_builder_selects_matching_pose_mode(config, monkeypatch, grasp, mode):
+    import serial
+    import arm.poses
+    import arm.real
+    import perception.floor
+    import brain.mission as mission
+    config['base'].update(wiring_confirmed=True, drive_calibrated=True, serial_port='/dev/cu.R4')
+    config['handoff']['grasp'] = grasp
+    loaded = []
+    monkeypatch.setattr(arm.poses, 'load', lambda path, mode: loaded.append(mode) or {})
+    class Floor:
+        def parking(self): return config['perception']['parking_spot_floor_m']
+    monkeypatch.setattr(perception.floor.FloorMap, 'load', lambda *a, **kw: Floor())
+    monkeypatch.setattr(serial, 'Serial', lambda *a, **kw: FakeSerial(config=config['base']))
+    monkeypatch.setattr(mission, 'UdpDetections', lambda *a: FakeDetections())
+    monkeypatch.setattr(arm.real, 'RealArm', lambda *a, **kw: SimArm())
+    monkeypatch.setattr(mission, 'Mission', lambda config, **kw: kw)
+    result = mission.build_real(config)
+    try:
+        assert loaded == [mode]
+        assert result['simulated'] is False
+    finally:
+        result['base'].close(); result['source'].close(); result['arm'].close()
+
+
+def test_extended_arm_refuses_base_motion_and_can_retry_after_manual_ready(make):
+    from arm.sim import DEFAULT_POSES
+    arm = SimArm()
+    arm.pos.update(DEFAULT_POSES['at_object'])
+    port = FakeSerial()
+    brain = make(arm=arm, port=port)
+    brain.request('phone', 'standing')
+    wait_for(lambda: brain.status()['state'] == 'Stopped')
+    assert 'ready pose' in brain.status()['message']
+    assert not any(c.startswith('DRIVE ') for c in port.commands)
+    # Stand-in for a person safely returning the arm; the brain never auto-moves it.
+    arm.pos.update(DEFAULT_POSES['ready'])
+    brain.request('phone', 'standing')
+    assert wait_for(lambda: brain.status()['last_pick'])['result'] == 'taken'

@@ -59,8 +59,36 @@ def test_real_reader_retries_start_and_frames_and_owns_data(settings, sdk):
         assert pipe.wait_for_frames.call_count == 2
         sdk.align.assert_called_once_with(sdk.stream.color)
         assert not np.shares_memory(frame.depth, frames.get_depth_frame().get_data())
-    pipe.stop.assert_called_once()
+    assert pipe.stop.call_count == 2  # Failed start cleanup, then normal exit.
     assert sleep.call_count == 2
+
+
+def test_failed_start_releases_pipeline_before_fresh_attempt(settings, sdk):
+    failed = MagicMock()
+    failed.start.side_effect = RuntimeError("partial UVC open")
+    failed.stop.side_effect = RuntimeError("start never completed")
+    good = sdk.pipeline.return_value
+    sdk.pipeline.side_effect = [failed, good]
+    with RealSense(settings, sdk=sdk, sleep=lambda _: None) as camera:
+        assert camera.pipeline is good
+        failed.start.assert_called_once()
+        failed.stop.assert_called_once()
+        good.start.assert_called_once()
+    good.stop.assert_called_once()
+
+
+def test_all_failed_starts_are_cleaned_up(settings, sdk):
+    pipelines = [MagicMock() for _ in range(5)]
+    for pipe in pipelines:
+        pipe.start.side_effect = RuntimeError("UVC device is already opened!")
+    sdk.pipeline.side_effect = pipelines
+    camera = RealSense(settings, sdk=sdk, sleep=lambda _: None)
+    with pytest.raises(RuntimeError, match="already opened"):
+        camera.__enter__()
+    assert camera.pipeline is None
+    for pipe in pipelines:
+        pipe.start.assert_called_once()
+        pipe.stop.assert_called_once()
 
 
 def test_stream_configuration(settings, sdk):

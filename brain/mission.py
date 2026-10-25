@@ -1,10 +1,11 @@
-"""M1 simulated mission and UI Brain adapter. Real navigation awaits P4/B5/B6."""
+"""M1 mission and UI adapter, with gated measured navigation."""
 from __future__ import annotations
 
 import argparse
 import copy
 from datetime import date
 import json
+import math
 from pathlib import Path
 import queue
 import threading
@@ -16,6 +17,23 @@ from base.driver import BaseDriver, FakeSerial
 from brain.detections import FakeDetections, ReplayDetections, UdpDetections, validate
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def grasp_settings(config):
+    """Validate selection before any hardware opens; the passive cup has no take sensor."""
+    handoff = config.get("handoff", {})
+    grasp = handoff.get("grasp", "claw")
+    if grasp not in ("claw", "suction"):
+        raise ValueError("handoff.grasp must be claw or suction")
+    options = {}
+    if grasp == "suction":
+        options["grasp"] = grasp
+        for key, default, maximum in (("suction_dwell_s", 2, 10), ("suction_hold_s", 4, 60)):
+            value = handoff.get(key, default)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 < value <= maximum:
+                raise ValueError(f"handoff.{key} must be positive and at most {maximum} seconds")
+            options[key] = value
+    return grasp, options
 
 
 class SimNavigation:
@@ -36,16 +54,23 @@ class SimNavigation:
 class Mission:
     def __init__(self, config, *, base, arm, source, poses=DEFAULT_POSES,
                  navigator_factory=SimNavigation, pick=pick_to_hand, log_dir=None,
-                 period=.1):
+                 period=.1, simulated=True):
+        self.grasp, self.pick_options = grasp_settings(config)
         self.config, self.base, self.arm, self.source = config, base, arm, source
         self.poses, self.pick, self.navigator_factory = poses, pick, navigator_factory
         self.period = period
+        self.simulated = simulated
+        self._base_status = None
+        self._limit_pending = None
+        self._limit_ready = True
+        self._boundary_started = None
+        self._boundary_frame = None
         self._lock = threading.Lock()  # Never held during file, serial or arm I/O.
         self._closed = threading.Event()
         self._wake_io = threading.Event()
         self._token = threading.Event()
         self._generation = 0
-        self._state, self._message, self._item = "Idle", "Ready (simulation)", None
+        self._state, self._message, self._item = "Idle", "Ready (simulation)" if simulated else "Ready", None
         self._detection = self._last_pick = None
         self._seen = self._attempts = 0
         self._last_frame = None
@@ -72,7 +97,7 @@ class Mission:
         self._io = threading.Thread(target=self._base_io, daemon=True, name="mission-base")
         self._loop = threading.Thread(target=self._run, daemon=True, name="mission-loop")
         self._logger.start(); self._io.start(); self._loop.start()
-        self._event("started", simulated=True)
+        self._event("started", simulated=simulated)
 
     def _event(self, kind, **fields):
         self._events.put(dict(t=time.time(), event=kind, **fields))
@@ -103,7 +128,11 @@ class Mission:
         self._stop_ticket += 1
         self._wake_io.set()
 
-    def request(self, item, hand):
+    def request(self, item, hand, *, max_distance_ft=None):
+        if max_distance_ft is not None and (isinstance(max_distance_ft, bool) or
+                not isinstance(max_distance_ft, (int, float)) or
+                not math.isfinite(max_distance_ft) or not 0 < max_distance_ft <= 20):
+            raise ValueError("distance must be greater than 0 and at most 20 feet")
         if item not in self.config["items"] or hand not in ("seated", "standing"):
             raise ValueError("unsupported item or hand preset")
         with self._lock:
@@ -115,6 +144,11 @@ class Mission:
             self._token = threading.Event()
             self._generation += 1
             self._item = item
+            # A fresh budget is installed only after acknowledged STOP. Legacy calls
+            # also get a bounded default, so an old exhausted budget cannot leak.
+            self._limit_pending = (self._generation, (20 if max_distance_ft is None else max_distance_ft) * 304.8)
+            self._limit_ready = False
+            self._boundary_started = None
             self._seen = self._attempts = 0
             self._last_frame = None
             self._last_camera = self._last_seen = time.monotonic()
@@ -145,6 +179,14 @@ class Mission:
     def thumbnail(self, name):
         return None
 
+    def _arm_ready(self):
+        position = self.arm.read()
+        frozen = self.config['arm'].get('frozen_joints', [])
+        joints = ('shoulder_pan', 'shoulder_lift', 'elbow_flex', 'wrist_flex', 'wrist_roll')
+        return all(joint in position and math.isfinite(position[joint]) and
+                   abs(position[joint] - self.poses['ready'][joint]) <= 5
+                   for joint in joints if joint not in frozen)
+
     def _base_io(self):
         while not self._closed.is_set():
             self._wake_io.wait(.05)
@@ -157,16 +199,36 @@ class Mission:
                 self._desired = None
                 generation = self._generation
                 cancelled = self._token.is_set()
+                pending_limit = self._limit_pending
+                arm_busy = self._pick_thread is not None and self._pick_thread.is_alive()
             try:
                 if halt:
-                    self.base.stop()
+                    self.base.stop_and_wait()
                     self._event("serial", command="STOP")
                     with self._lock:
                         self._stop_completed = stop_ticket
+                elif pending_limit and pending_limit[0] == generation and not cancelled and not arm_busy:
+                    ready = self._arm_ready()  # Read only, after STOP, before any base motion.
+                    if not ready:
+                        with self._lock:
+                            if generation == self._generation:
+                                self._token.set()
+                                self._limit_pending = None
+                                self._halt()
+                                self._state_to("Stopped", "Arm is not at taught ready pose; return it safely before driving")
+                    else:
+                        self.base.set_travel_limit(pending_limit[1])
+                        with self._lock:
+                            if generation == self._generation and not self._token.is_set():
+                                self._limit_pending = None
+                                self._limit_ready = True
+                        self._event("serial", command="LIMIT", mm=pending_limit[1])
                 elif desired and desired[0] == generation and not cancelled:
                     self.base.drive(*desired[1])
                     self._event("serial", command="DRIVE", speeds=desired[1])
                 status = self.base.status(timeout=0)
+                with self._lock:
+                    self._base_status = status
                 if time.monotonic() - status.received_at > .3 or status.estop:
                     raise RuntimeError("stale base status or E-stop")
             except Exception as error:
@@ -176,7 +238,7 @@ class Mission:
                     self._io_error = str(error)
                     self._token.set()
                     self._desired = None
-                    self._state_to("Failed", "Base connection failed; use E-stop")
+                    self._state_to("Failed", f"Control connection failed: {error}; use E-stop")
                 try:
                     self.base.stop()
                 except Exception:
@@ -184,7 +246,9 @@ class Mission:
                 return
 
     def _drive(self, speeds):
-        self._desired = (self._generation, speeds)
+        limit = self.config["base"]["max_speed_mm_s"]
+        scale = max(1, max(abs(value) for value in speeds) / limit)
+        self._desired = (self._generation, tuple(value / scale for value in speeds))
         self._wake_io.set()
 
     def _start_pick(self, generation, token):
@@ -195,11 +259,15 @@ class Mission:
                                    {"pick": "Picking up", "present": "Presenting", "wait_for_take": "Please take the item"}[state])
         try:
             result = self.pick(self.arm, self.poses,
-                               speed_deg_s=self.config["arm"]["move_speed_deg_s"],
+                               speed_deg_s=(self.config["arm"]["move_speed_deg_s"] if self.simulated else
+                                            min(25, self.config["arm"]["move_speed_deg_s"])),
                                handoff_timeout_s=self.config["handoff"]["timeout_s"],
                                handoff_grip=self.config["handoff"].get("grip", "squeeze"),
                                stop_event=token, on_state=on_state,
-                               log=lambda message: self._event("arm", message=message))
+                               log=lambda message: self._event("arm", message=message), **self.pick_options)
+            if self.grasp == "suction" and result.get("result") == "taken":
+                result = dict(result, result="unverified", take_verified=False)
+                result["detail"] = "Timed suction sequence finished; seal and take were not sensed. " + result.get("detail", "")
         except Exception as error:
             result = dict(result="stuck", detail=str(error), grasp="scripted", attempts=0, seconds=0)
         with self._lock:
@@ -236,6 +304,9 @@ class Mission:
                     self._last_pick = result
                     if result["result"] == "taken":
                         self._state_to("Idle", "Item taken")
+                    elif result["result"] == "unverified":
+                        self._halt()
+                        self._state_to("Idle", "Suction sequence finished; visually confirm pickup and take")
                     elif result["result"] == "dropped" and self._attempts < 3:
                         self._seen = 0
                         self._navigator = self.navigator_factory()
@@ -247,7 +318,41 @@ class Mission:
                     else:
                         self._halt()
                         self._state_to("Failed", f"Pick failed: {result['result']}")
+            if hasattr(self._navigator, "observe"):
+                age = float("inf") if self._last_frame is None else time.time() - self._last_frame[1]
+                self._navigator.observe(self._last_frame, age, self._base_status)
+            if self._state == "BoundaryCheck":
+                if not self._boundary_stopped and self._stop_completed >= self._stop_ticket:
+                    self._boundary_stopped = True
+                    self._boundary_started = time.time()
+                    self._boundary_frame = self._last_frame
+                    return
+                # Demand a frame captured after stopping, not a cached detection.
+                fresh = (self._boundary_stopped and self._last_frame is not None
+                         and self._last_frame != self._boundary_frame
+                         and self._last_frame[1] >= self._boundary_started
+                         and 0 <= time.time() - self._last_frame[1] <= .3)
+                if fresh or time.time() - self._boundary_started > 2:
+                    result = ("Item seen, but travel limit reached; reposition before another request"
+                              if fresh and self._detection else
+                              "Item not found at travel limit; reposition before another request" if fresh else
+                              "Travel limit reached; no fresh camera frame")
+                    self._token.set()
+                    self._state_to("Stopped", result)
+                return
             if self._state in ("Search", "Approach"):
+                if not self._limit_ready:
+                    return
+                if self.base.limit_reached:
+                    self._halt()
+                    self._boundary_started = time.time()
+                    self._boundary_frame = self._last_frame
+                    self._boundary_stopped = False
+                    self._state_to("BoundaryCheck", "Travel limit reached; stopped and checking camera")
+                    return
+                if self._base_status is None:
+                    self._halt()
+                    return
                 if self._pick_thread is not None and self._pick_thread.is_alive():
                     self._halt()
                     return  # A replaced mission must finish holding the arm first.
@@ -256,11 +361,12 @@ class Mission:
                     self._state_to("Failed", "Camera lost")
                 elif self._state == "Search":
                     if self._seen >= 5:
-                        self._state_to("Approach", "Approaching (simulated parking)")
+                        self._halt()
+                        self._state_to("Approach", "Approaching (simulated parking)" if self.simulated else "Approaching measured pickup spot")
                     else:
                         exhausted, speeds = self._navigator.search()
                         if exhausted:
-                            self._halt(); self._state_to("Failed", "Two simulated turns; item not found")
+                            self._halt(); self._state_to("Failed", "Two simulated turns; item not found" if self.simulated else "Search exhausted; item not found")
                         else:
                             self._drive(speeds)
                 elif now - self._last_seen > 1:
@@ -269,6 +375,7 @@ class Mission:
                     self._parking_stop_ticket = None
                     self._state_to("Search", "Item lost; searching again")
                 elif self._detection is None:
+                    self._parking_stop_ticket = None
                     self._halt()
                 else:
                     parked, speeds = self._navigator.approach(self._detection)
@@ -281,12 +388,12 @@ class Mission:
                             self._state_to("Pick", "Picking up")
                             start_pick = self._generation, self._token
                     else:
+                        self._parking_stop_ticket = None  # Any renewed approach needs a new stopped acknowledgment.
                         self._drive(speeds)
             elif self._state == "Failed" and not self._io_error and now - self._failed_at > 1:
                 self._state_to("Idle", self._message)
         if start_pick:
-            # Stop the simulated base before arm work starts. No real-mode builder
-            # is exposed until measured navigation and physical interlocks exist.
+            # The firmware STOP acknowledgment must precede arm work.
             self._pick_thread = threading.Thread(target=self._start_pick, args=start_pick,
                                                  daemon=True, name="mission-pick")
             self._pick_thread.start()
@@ -320,12 +427,68 @@ class Mission:
 
 
 def build(config, sim):
+    grasp_settings(config)
     if not sim:
-        raise RuntimeError("Real M1 is gated on P4 calibration and B5/B6 navigation; use --sim")
+        return build_real(config)
     cfg = config["base"]
     base = BaseDriver(FakeSerial(max_speed_mm_s=cfg["max_speed_mm_s"]),
                       max_speed_mm_s=cfg["max_speed_mm_s"], max_lift_mm=1000)
     return Mission(config, base=base, arm=SimArm(), source=FakeDetections())
+
+
+def build_real(config):
+    # Validate every prerequisite before opening any serial device.
+    from arm.poses import load
+    from perception.floor import FloorMap
+    from brain.navigation import RealNavigation
+    grasp, _ = grasp_settings(config)
+    cfg = config["base"]
+    if cfg.get("wiring_confirmed") is not True or cfg.get("drive_calibrated") is not True:
+        raise RuntimeError("Real M1 requires P4 and completed wiring/loaded-drive checks")
+    arm_cfg = config["arm"]
+    frozen = arm_cfg.get("frozen_joints")
+    if not isinstance(frozen, list) or "wrist_roll" not in frozen:
+        raise RuntimeError("faulty wrist_roll must remain frozen before real startup")
+    for name, maximum in (("max_relative_target_deg", 10), ("move_speed_deg_s", 45)):
+        value = arm_cfg.get(name)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 < value <= maximum:
+            raise RuntimeError(f"invalid arm safety limit: {name}")
+    port_name = cfg.get("serial_port")
+    if not isinstance(port_name, str) or not port_name.startswith("/dev/") or "XXXX" in port_name:
+        raise RuntimeError("configure the measured Uno R4 serial port")
+    normalize = lambda p: p.replace("/dev/tty.", "/dev/cu.")
+    if normalize(port_name) in [normalize(arm_cfg[key]) for key in ("follower_port", "leader_port")]:
+        raise RuntimeError("R4 port must not be an arm port")
+    floor = FloorMap.load(ROOT / "config/floor_homography.json",
+                          colour_size=config["realsense"]["colour"], flip=config["realsense"]["flip"])
+    if math.dist(floor.parking(), config["perception"]["parking_spot_floor_m"]) > 1e-6:
+        raise RuntimeError("P4 parking target differs from robot.yaml")
+    poses = load(ROOT / "config/poses.json", mode="suction" if grasp == "suction" else "hand")
+    factory = lambda: RealNavigation(config, floor)
+    factory()  # Validate navigation before ports are opened.
+    base = arm = source = None
+    try:
+        import serial
+        from arm.real import RealArm
+        source = UdpDetections(config["perception"]["detections_udp"])
+        port = serial.Serial(cfg["serial_port"], baudrate=cfg["baud"], timeout=.05, write_timeout=.1, exclusive=True)
+        base = BaseDriver(port, max_speed_mm_s=cfg["max_speed_mm_s"], max_lift_mm=1000)
+        base.status(timeout=3)
+        base.synchronize()
+        base.verify_firmware(cfg)
+        arm_cfg = config["arm"]
+        arm = RealArm(arm_cfg["follower_port"], arm_cfg["follower_id"],
+                      float(arm_cfg["max_relative_target_deg"]), frozen=arm_cfg.get("frozen_joints", ()))
+        return Mission(config, base=base, arm=arm, source=source, poses=poses,
+                       navigator_factory=factory, simulated=False)
+    except BaseException:
+        for resource in (base, source, arm):
+            if resource is not None:
+                try:
+                    resource.close()
+                except Exception:
+                    pass
+        raise
 
 
 def main(argv=None):
