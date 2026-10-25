@@ -56,7 +56,7 @@ def test_full_simulated_mission_uses_real_pick_and_logs_states(make):
     brain.close()
     records = [json.loads(line) for line in brain.log_path.read_text().splitlines()]
     states = [row['state'] for row in records if row['event'] == 'state']
-    assert states[:6] == ['Search', 'Approach', 'Pick', 'Present', 'WaitForTake', 'Idle']
+    assert states[:7] == ['Search', 'Approach', 'Pick', 'Return', 'Present', 'WaitForTake', 'Idle']
     assert any(row['event'] == 'detection' for row in records)
     assert any(row.get('command') == 'STOP' for row in records)
     assert brain.status()['lift_mm'] is None

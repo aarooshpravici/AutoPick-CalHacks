@@ -14,6 +14,7 @@ import time
 from arm.pick import pick_to_hand
 from arm.sim import SimArm, DEFAULT_POSES
 from base.driver import BaseDriver, FakeSerial
+from base.homing import Path as DrivenPath, Retrace
 from brain.detections import FakeDetections, ReplayDetections, UdpDetections, validate
 from perception.publish import address
 
@@ -91,6 +92,13 @@ class Mission:
             arm_camera = SimArmCamera() if simulated else ArmCamera(config)
         self.arm_camera = arm_camera if self.arm_policy else None
         self._arm_go = False
+        # A15: drive the recorded path back to the start between the grasp and the hand-off.
+        nav, base_cfg = config.get("navigation", {}), config["base"]
+        self.return_home = nav.get("return_to_start", False) is True and self.grasp == "claw"
+        self.return_speed = min(nav.get("return_speed_mm_s", 20), base_cfg["max_speed_mm_s"])
+        self.steps_per_mm = base_cfg["half_steps_per_rev"] / (math.pi * base_cfg["wheel_diameter_mm"])
+        self._path = None
+        self._returning = False
         self.config, self.base, self.arm, self.source = config, base, arm, source
         self.poses, self.pick, self.navigator_factory = poses, pick, navigator_factory
         self.period = period
@@ -193,6 +201,7 @@ class Mission:
             self._navigator = self.navigator_factory()
             self._parking_stop_ticket = None
             self._arm_go = False
+            self._path = DrivenPath()
             self._halt()
             self._state_to("Search", f"Looking for: {item}")
             self._event("request", item=item, hand=hand)
@@ -273,7 +282,8 @@ class Mission:
                 generation = self._generation
                 cancelled = self._token.is_set()
                 pending_limit = self._limit_pending
-                arm_busy = self._pick_thread is not None and self._pick_thread.is_alive()
+                arm_busy = (self._pick_thread is not None and self._pick_thread.is_alive()
+                            and not self._returning)   # A15: the pick thread hands the base back while returning
                 epoch = self._arm_epoch
                 if arm_busy:
                     self._ready_at = None
@@ -298,6 +308,9 @@ class Mission:
                 status = self.base.status(timeout=0)
                 with self._lock:
                     self._base_status = status
+                    if (self._path is not None and self._state in ("Search", "Approach")
+                            and generation == self._generation):
+                        self._path.add(status.left_steps, status.right_steps)
                 if time.monotonic() - status.received_at > .3 or status.estop:
                     raise RuntimeError("stale base status or E-stop")
             except Exception as error:
@@ -324,9 +337,12 @@ class Mission:
         def on_state(state):
             with self._lock:
                 if generation == self._generation and not token.is_set():
-                    self._state_to({"pick": "Pick", "present": "Present", "wait_for_take": "WaitForTake"}[state],
-                                   {"pick": "Picking up", "present": "Presenting", "wait_for_take": "Please take the item"}[state])
+                    self._state_to({"pick": "Pick", "return": "Return", "present": "Present", "wait_for_take": "WaitForTake"}[state],
+                                   {"pick": "Picking up", "return": "Driving back to the start", "present": "Presenting",
+                                    "wait_for_take": "Please take the item"}[state])
         options = dict(self.pick_options)
+        if self.return_home:
+            options["before_present"] = lambda: self._drive_home(generation, token)
         camera_notes = []
         try:
             if self.arm_camera is not None:
@@ -494,6 +510,65 @@ class Mission:
                                                  daemon=True, name="mission-pick")
             self._pick_thread.start()
 
+    def _drive_home(self, generation, token):
+        """A15, in the pick thread with the object held at ready: retrace the outbound path.
+        Fresh LIMIT first, every DRIVE still passes the arm-ready gate, and it returns only
+        after an acknowledged STOP, so the arm never moves while the base does."""
+        with self._lock:
+            if token.is_set() or generation != self._generation:
+                raise RuntimeError("stopped")
+            points = list(self._path.points) if self._path else []
+            status = self._base_status
+            length = self._path.length_mm(self.steps_per_mm) if self._path else 0
+        if len(points) < 2 or length < 20 or status is None:
+            self._event("arm", message="return to start: already there")
+            return
+        budget = min(6096, length * 1.5 + 150)   # slow final approach and step rounding
+        retrace = Retrace(points, (status.left_steps, status.right_steps),
+                          steps_per_mm=self.steps_per_mm, speed_mm_s=self.return_speed)
+        deadline = time.monotonic() + length / self.return_speed * 3 + 15
+        with self._lock:
+            self._returning = True
+            self._limit_ready = False
+            self._limit_pending = (generation, budget)
+            self._wake_io.set()
+        self._event("return", length_mm=round(length), budget_mm=round(budget), points=len(points))
+        try:
+            while True:
+                time.sleep(.05)
+                with self._lock:
+                    if token.is_set() or generation != self._generation:
+                        raise RuntimeError("stopped")
+                    if self.base.limit_reached:
+                        raise RuntimeError("travel limit reached on the way back")
+                    if time.monotonic() > deadline:
+                        raise RuntimeError("return timed out")
+                    if not self._limit_ready:
+                        continue
+                    status = self._base_status
+                    if status is None or time.monotonic() - status.received_at > .3:
+                        continue
+                    command = retrace.update(status.left_steps, status.right_steps)
+                    if command.done:
+                        break
+                    self._drive((command.left, command.right))
+        finally:
+            with self._lock:
+                self._halt()
+                ticket = self._stop_ticket
+            stop_deadline = time.monotonic() + 2
+            while time.monotonic() < stop_deadline:
+                with self._lock:
+                    if self._stop_completed >= ticket:
+                        break
+                time.sleep(.02)
+            with self._lock:
+                self._returning = False
+                stopped = self._stop_completed >= ticket
+        if not stopped:
+            raise RuntimeError("STOP after the return was not acknowledged")
+        self._event("arm", message="back at the start")
+
     def _begin_pick(self):
         """Caller holds the lock, after the parking STOP acknowledgment."""
         self._attempts += 1
@@ -536,7 +611,8 @@ def build(config, sim):
     if not sim:
         return build_real(config)
     cfg = config["base"]
-    base = BaseDriver(FakeSerial(max_speed_mm_s=cfg["max_speed_mm_s"]),
+    base = BaseDriver(FakeSerial(max_speed_mm_s=cfg["max_speed_mm_s"], wheel_diameter_mm=cfg["wheel_diameter_mm"],
+                                 steps_per_rev=cfg["half_steps_per_rev"]),
                       max_speed_mm_s=cfg["max_speed_mm_s"], max_lift_mm=1000)
     return Mission(config, base=base, arm=SimArm(), source=FakeDetections(labels=config["items"]))
 

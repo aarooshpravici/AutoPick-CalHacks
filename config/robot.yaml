@@ -74,3 +74,5 @@ navigation:                         # Draft B5/B6 settings; physical acceptance 
   search_speed_mm_s: 15
   search_step_deg: 30
   search_pause_s: 0.5
+  return_to_start: true               # A15: after the grasp, retrace the commanded path back, then present
+  return_speed_mm_s: 20

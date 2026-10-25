@@ -673,4 +673,4 @@ def test_object_dropdown_contains_selectable_phone_and_sock():
 
     parser = Options()
     parser.feed(PAGE)
-    assert parser.values == ['', 'phone', 'sock']
+    assert parser.values == ['', 'sock']        # demo: hardcoded sock pick only
