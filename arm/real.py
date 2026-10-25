@@ -75,7 +75,23 @@ class RealArm:
         if not self.robot.is_calibrated:
             self.robot.bus.disconnect(disable_torque=False)
             raise RuntimeError(f"no matching calibration for '{robot_id}'; run task A1 (lerobot-calibrate) first")
-        self._ramp_torque(ramp_s, sleep)
+        try:
+            self._ramp_torque(ramp_s, sleep)
+        except BaseException:
+            self._abandon_ramp()
+            raise
+
+    def _abandon_ramp(self) -> None:
+        """Ctrl-C or an error part-way through the ramp: the goals still equal the present
+        positions, so give every motor its full torque cap in one write (it holds properly,
+        not at 20-90 %), then close the port with the torque left on."""
+        bus = self.robot.bus
+        try:
+            bus.sync_write("Torque_Limit", {m: _torque_cap(m) for m in bus.motors}, normalize=False)
+        except BaseException:  # noqa: BLE001 - the port must still be closed
+            pass
+        finally:
+            bus.disconnect(disable_torque=False)
 
     def _drop_frozen_motors(self) -> None:
         """Rebuild the bus without the frozen motors, before it ever connects: no packet goes to

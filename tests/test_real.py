@@ -262,3 +262,27 @@ def test_only_arm_joints_can_be_frozen(new_layout, bad):
 def test_nothing_frozen_keeps_the_full_bus(new_layout):
     RealArm("/dev/ttyFAKE", "so101_follower_arm", 10)
     assert set(FakeFollower.instances[-1].bus.motors) == set(JOINTS)
+
+
+# --- Ctrl-C or an error during the torque ramp ----------------------------------------------
+
+@pytest.mark.parametrize("exc", [KeyboardInterrupt, ConnectionError])
+def test_an_interrupted_ramp_holds_at_the_full_caps_and_closes_the_port(new_layout, exc):
+    """Stopped part-way up the ramp, the arm must not stay connected at a 20-90 % torque limit:
+    every motor gets its full cap in one write, then the port closes with the torque on."""
+    waits = []
+
+    def sleep(s):
+        waits.append(s)
+        if len(waits) == 3:
+            raise exc("stopped during the ramp")
+
+    with pytest.raises(exc):
+        RealArm("/dev/ttyFAKE", "so101_follower_arm", 10, frozen=["wrist_roll"], sleep=sleep)
+    bus = FakeFollower.instances[-1].bus
+    after = bus.log[bus.log.index(("enable", None)) + 1:]
+    caps = {j: (500 if j in ("gripper", "shoulder_pan") else 1000) for j in JOINTS if j != "wrist_roll"}
+    assert {e[2]: e[3] for e in after[-len(caps):]} == caps          # the last write: full caps, all of them
+    assert {e[2]: e[3] for e in after[:len(caps)]} != caps           # it really was part-way up
+    assert all(e[1] == "Torque_Limit" for e in after)                # and no goal moved
+    assert bus.disconnects == [False]                                # closed, torque left on
