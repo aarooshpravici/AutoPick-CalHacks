@@ -631,7 +631,20 @@ flowchart TD
 - Vary position, distance, angle and lighting. Include the phone face up, face down and in different cases, plus empty floor.
 - Label boxes in Roboflow, CVAT or Label Studio.
 
-**Training.** Fine-tune a nano YOLO model with Ultralytics on the PC GPU. At the venue, add about 50 photos of the actual floor and retrain briefly on top.
+**Training.** Fine-tune a YOLO model with Ultralytics, starting with nano (the fastest) at `imgsz=1280`. Train on the PC GPU, the Mac (`mps`, a few minutes for a small set), or Google Colab. At the venue, add about 50 photos of the actual floor and retrain briefly on top.
+
+**If nano can't find the phone.** Work up this ladder, one step at a time. Measure each step with the P3 check: live, 9 of 10 placements between 0.3 and 1.0 m, nothing on empty floor, and at least 10 detections a second on the robot Mac with everything else running.
+
+| Step | Change | Cost | Helps when |
+|---|---|---|---|
+| 1 | Nano at `imgsz=1280`, trained on low-mount photos with far phones | Baseline | — |
+| 2 | **More and better data:** far phones (0.75–1.0 m), venue floor, look-alikes as negatives | Photos and labels | Misses and false alarms of every kind |
+| 3 | **A bigger model:** small, then medium, at `imgsz=1280`; train on Colab or the PC, run on the Mac | Lower fps (measure it) | Far, thin phones are missed |
+| 4 | **Crop the floor band:** run the detector on the strip of the image where 0.6–1.0 m floor appears, at full resolution, and merge the boxes | A little code in `publish.py` | Far phones are too small in the full frame |
+| 5 | **Raise the front camera** to a post 25–35 cm up (6.3): the phone looks about 3× taller. ACT doesn't use this camera, so it can move after the arm demos; redo P4 and retake the YOLO photos | HW2 mount, new photos | Far phones stay under about 10 px tall |
+| 6 | **Limit the demo:** the phone within about 0.6–0.8 m, on a floor that contrasts with it | None | A last resort for the demo |
+
+Open-vocabulary detectors (YOLO-World, OWLv2) are not a fallback: they found almost none of the phones in the first photo set.
 
 **Publisher (`perception/publish.py`).** Runs the detector on each colour frame and sends the detection message (9.2), including `floor_m` from the floor mapping and `depth_m` from the aligned depth.
 
@@ -913,7 +926,7 @@ flowchart LR
 | D5 | Mast-top camera (stretch) | Normal or wide angle | SW1 + HW2 | Sit in the demo chair; check the hand stays in view at all tray heights. |
 | D6 | Deck material | Plywood, acrylic, 2020 frame | HW1 | What's available and quickest to cut. |
 | D7 | Power source | Tether or battery | HW1 | Tether for the event; battery only if everything else is done. |
-| D8 | Training backup | PC only, or PC + cloud GPU | SW1 | If the PC is busy at the event, book cloud time. |
+| D8 | Training backup | The PC, Google Colab, or the Mac | SW1 + SW2 | YOLO trains anywhere: Colab or the Mac are fine for a few hundred photos. ACT trains on the PC (`training/remote.sh`); if the PC is busy, use Colab with a notebook that installs the same pinned LeRobot commit as `requirements-lerobot.txt`. |
 | D9 | Grip while presenting | Full squeeze or light hold: `handoff.grip` in `robot.yaml`, `squeeze` or `light` (10.1). It stays `squeeze` until A5 decides. In `light` mode, taken = the claw closes at least 4 units from where it held the phone (or reaches the closed side) for 6 reads in a row. | SW1 | A5 pull test: can a seated person pull the phone out easily, and does it stay put for 60 s? |
 | D10 | Drive motors and turning | Stepper or DC motors; left/right pairs or four channels; keep the corner wheel spacing or shorten it | HW1 (Darren) + SW2 | Darren confirms the motors and wiring, and SW2 adapts B3. Then turn the base in place on serial: if it struggles or stalls, shorten the wheelbase or change the tyres. |
 
@@ -1256,6 +1269,7 @@ Requests for you:
 | Servos reset when the steppers start (brownout) | Low | High | Capacitor, short thick wires; separate supply for the arm |
 | The Mac struggles (depth alignment + YOLO + ACT + 3 cameras) | Medium | Medium | Turn off alignment; run YOLO slower; ACT only runs during the grasp |
 | The venue floor confuses the detector | Medium | Medium | P5 top-up with venue photos |
+| The detector misses far or flat phones from the low camera | High | High | The ladder in 10.3: more far-phone data, then a bigger model, then a floor-band crop, then raising the camera |
 | Wi-Fi or the API is down | Low | Low | Keyword fallback in the parser; STOP never needs the network |
 | The training PC is busy | Medium | Medium | Cloud GPU backup (D8) |
 | Behind schedule | High | High | Gates, the cut list (14.3), feature freeze at hour 30 |
