@@ -23,12 +23,12 @@ def validate(config, direction, speed, duration, distance_mm):
         raise ValueError('bring-up caps: speed <= min(10, configured cap) mm/s, duration <= 2 s, travel <= 20 mm')
 
 
-def jog(driver, config, direction, speed, duration, distance_mm):
+def jog(driver, config, direction, speed, duration, distance_mm, *, real):
     validate(config, direction, speed, duration, distance_mm)
     try:
         driver.status(timeout=3)
         driver.synchronize()
-        info = driver.verify_firmware(config['base'], require_ready=not isinstance(driver.port, FakeSerial))
+        info = driver.verify_firmware(config['base'], require_ready=real)
         before = driver.fresh_status(after=time.monotonic())
         driver.set_travel_limit(distance_mm)
         started = time.monotonic()
@@ -84,7 +84,7 @@ def main(argv=None):
                           steps_per_rev=config['base']['half_steps_per_rev'])
     try:
         with BaseDriver(port, max_speed_mm_s=config['base']['max_speed_mm_s'], max_lift_mm=1000, timeout=1) as driver:
-            result = jog(driver, config, args.direction, args.speed, args.seconds, args.distance_mm)
+            result = jog(driver, config, args.direction, args.speed, args.seconds, args.distance_mm, real=args.real)
             print(json.dumps(dict(result, simulated=not args.real), indent=2))
     except (Exception, KeyboardInterrupt) as error:
         print(f'Test failed; use physical E-stop if motion persists: {error}', file=sys.stderr)
