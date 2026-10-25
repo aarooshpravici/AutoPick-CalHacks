@@ -67,15 +67,15 @@ const scenarios = {
   async phone_button_sends_structured_fetch_without_parser() {
     routes["/fetch"] = opts => { bodies.push(JSON.parse(opts.body)); return reply(200, {parsed: FETCH}); };
     for (const value of ["", "0", "-1", "Infinity", "21", "abc"]) {
-      el("distance").value = value; el("object").value = "phone";
+      el("distance").value = value; el("object").value = "sock";
       await el("go").listeners.click();
     }
     el("distance").value = "3.5"; el("object").value = "";
     await el("go").listeners.click();
     assert.strictEqual(count("/fetch"), 0);
-    el("object").value = "phone";
+    el("object").value = "sock";
     await el("ask").listeners.submit({preventDefault() {}});
-    assert.deepStrictEqual(bodies, [{item:"phone", hand:"standing", distance_ft:3.5}]);
+    assert.deepStrictEqual(bodies, [{item:"sock", hand:"standing", distance_ft:3.5}]);
     assert.strictEqual(count("/request"), 0);
     assert.strictEqual(count("/fetch"), 1);
   },

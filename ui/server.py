@@ -485,9 +485,9 @@ footer { display:flex; justify-content:space-between; gap:16px; padding-top:24px
       <div class="card-label"><h3>Make a request</h3><span class="card-number">01 / REQUEST</span></div>
       <h3 class="request-title">How far in feet did you drop your item?</h3><p class="help">Enter an estimate, then choose your item. Turning also uses this travel budget. At the limit, we stop and check the camera.</p>
       <form id="ask">
-        <input id="text" type="hidden" value="phone">
+        <input id="text" type="hidden" value="sock">
         <div class="distance-field"><label for="distance">Estimated distance (feet)</label><input id="distance" type="number" inputmode="decimal" min="0" max="20" step="any" placeholder="e.g. 3.5" required aria-describedby="distance-help"><small id="distance-help">More than 0, up to 20 feet. Motor-step estimate, not exact floor distance.</small></div>
-        <div class="select-wrap"><label for="object">What did you drop?</label><select id="object" required><option value="" selected>Select an object</option><option value="phone">Phone</option><option value="sock">Sock</option></select></div>
+        <div class="select-wrap"><label for="object">What did you drop?</label><select id="object" required><option value="" selected>Select an object</option><option value="sock">Sock</option></select></div>
         <div class="select-wrap"><label for="hand">Hand-off height</label><select id="hand" aria-label="Hand height"><option value="standing" selected>Standing</option><option value="seated">Seated</option></select></div>
         <button class="go" id="go" type="button" aria-disabled="false">Start request ↗</button>
       </form>
@@ -636,8 +636,8 @@ function startRequest() {
   if (!Number.isFinite(distance) || distance <= 0 || distance > 20) {
     $("reply").textContent = "Enter a distance greater than 0 and up to 20 feet."; $("distance").focus(); return;
   }
-  if (!["phone", "sock"].includes($("object").value)) {
-    $("reply").textContent = "Choose Phone or Sock before starting."; $("object").focus(); return;
+  if ($("object").value !== "sock") {
+    $("reply").textContent = "Choose Sock before starting."; $("object").focus(); return;
   }
   endConversation(); return send($("object").value, true);
 }
@@ -733,7 +733,7 @@ async function refresh() {
 const TOUR_STEPS = [
   {target:null, title:"Welcome, let’s help you use Floor Picker", text:"A quick tour of choosing your item, setting your hand-off height and staying in control."},
   {target:"distance", title:"About how far away?", text:"Type an estimate in feet, such as 3.5. This caps estimated wheel travel, including turns. At the limit the robot stops and checks the camera; it won’t drive farther or return on its own."},
-  {target:"object", title:"Choose your object", text:"Select Phone or Sock from this list. Choosing an object won’t start the robot."},
+  {target:"object", title:"Choose your object", text:"Select Sock from this list. Choosing an object won’t start the robot."},
   {target:"hand", title:"Choose your hand-off height", text:"Choose Seated or Standing to tell Floor Picker how you’d like the item handed to you. Set this before starting your request."},
   {target:"go", title:"Start when you’re ready", text:"With distance, object and hand-off height set, tap Start request. The camera guides the approach within your estimate. This tutorial never starts motion."},
   {target:"stop", title:"You can stop at any time", text:"Watch Mission status to follow along. Hit STOP whenever you need to stop motion and hold the arm. You can also press Esc."}
