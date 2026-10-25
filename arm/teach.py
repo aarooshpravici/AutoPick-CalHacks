@@ -1,6 +1,7 @@
 """Teach the pick poses with the leader arm (task A3, plan 10.1).
 
-    python -m arm.teach [--out PATH] [--speed DEG_S] [--config PATH] [--with-tray] [--dry-run]
+    python -m arm.teach [--out PATH] [--speed DEG_S] [--config PATH] [--with-tray]
+                        [--grasp claw|suction] [--dry-run]
 
 First a live table lines the arms up (arm/align.py): the follower holds still while
 the person moves the leader to match it, and Enter starts only once every joint
@@ -16,6 +17,14 @@ for the stretch tray mode. If the claw open and closed come out too close togeth
 so far are kept. While teaching, LeRobot's warning that it eased the claw (its step
 cap) is muted, so the prompts stay readable.
 
+--grasp suction teaches the suction cup's poses instead, for the flat-phone path (python -m
+arm.pick run --grasp suction): suction_above, suction_press, suction_lift and suction_present,
+and `ready` too if the file doesn't have one yet. There are no claw steps. The poses are merged
+into the existing file (default config/poses.json), so the claw poses already in it are kept
+(they are backed up first, like any save). The claw is not moved by a suction pick: it stays at
+the gripper value recorded in suction_press, so set the claw where the cup is clear of the phone
+before teaching and leave it there. --with-tray does not apply.
+
 Speed: config/robot.yaml `arm.move_speed_deg_s` is the ceiling, as for arm.pick.
 The follower copies the leader at that speed by default; a larger --speed is
 refused. First real runs use --speed 25.
@@ -23,7 +32,7 @@ refused. First real runs use --speed 25.
 --dry-run uses no hardware. A scripted person moves a simulated leader through
 sim.DEFAULT_POSES and "presses Enter" once the simulated follower is there. It
 saves to a new temporary folder unless --out is given, and never writes
-config/poses.json.
+config/poses.json. (With --grasp suction and an --out that exists, that file is merged into.)
 """
 
 from __future__ import annotations
@@ -39,9 +48,9 @@ from pathlib import Path
 
 from . import align as align_mod
 from . import poses as poses_mod
-from .pick import (DEFAULT_CONFIG_PATH, MAX_SPEED_DEG_S, RATE_HZ, RealClock, _is_number,
+from .pick import (DEFAULT_CONFIG_PATH, GRASPS, MAX_SPEED_DEG_S, RATE_HZ, RealClock, _is_number,
                    load_arm_config, resolve_speed)
-from .poses import ARM_JOINTS, JOINTS, POSE_NAMES, REPO_ROOT
+from .poses import ARM_JOINTS, JOINTS, POSE_NAMES, REPO_ROOT, SUCTION_POSES
 
 STEPS = [                   # hand mode; teach_steps(with_tray=True) adds TRAY_STEP after present
     ("ready", "the start pose: arm up and out of the front camera's view"),
@@ -53,6 +62,17 @@ STEPS = [                   # hand mode; teach_steps(with_tray=True) adds TRAY_S
     ("gripper_closed", "close the claw fully, with nothing in it"),
 ]
 TRAY_STEP = ("above_tray", "claw over the tray at its lowest position (stretch tray mode)")
+SUCTION_STEPS = [           # --grasp suction; `ready` (STEPS[0]) goes first only if the file has none
+    ("suction_above", "suction cup a few cm straight above the middle of the phone on the parking spot, "
+                      "facing down; set the claw where it should stay for the whole pick, clear of the "
+                      "phone, and leave it there"),
+    ("suction_press", "lower the cup straight onto the phone and press it a little past touching, so the cup "
+                      "is squashed flat (the pick commands the follower's position here, no firmer); keep the "
+                      "claw where it was"),
+    ("suction_lift", "the carry pose: the phone raised clear of the deck, held on the cup"),
+    ("suction_present", "the hand-off pose: the phone raised high and in easy reach, where the person "
+                        "pulls it off the cup"),
+]
 CONFIG_KEYS = ("follower_port", "follower_id", "leader_port", "leader_id")
 SAME_POSE_DEG = 2.0         # a pose this close to the previous one on every arm joint wasn't moved to
 DRY_RUN_LIMIT_S = 600.0     # simulated seconds the scripted person waits for the follower per step
@@ -115,19 +135,27 @@ def enter_waiter(step: str, prompt: str) -> _EnterPress:
     return _EnterPress(prompt)
 
 
-def teach_steps(with_tray: bool = False) -> list:
-    """The (name, hint) steps in order: STEPS, plus TRAY_STEP right after present."""
+def teach_steps(with_tray: bool = False, grasp: str = "claw", with_ready: bool = True) -> list:
+    """The (name, hint) steps in order: STEPS, plus TRAY_STEP right after present. For grasp
+    "suction": SUCTION_STEPS, preceded by the `ready` step if with_ready (no tray, no claw)."""
+    if grasp == "suction":
+        if with_tray:
+            raise ValueError("--with-tray does not apply to suction (the tray is a claw mode)")
+        return [*([STEPS[0]] if with_ready else []), *SUCTION_STEPS]
     if not with_tray:
         return list(STEPS)
     at = [name for name, _ in STEPS].index("present") + 1
     return [*STEPS[:at], TRAY_STEP, *STEPS[at:]]
 
 
-def dry_run_targets(poses: dict, with_tray: bool = False) -> dict:
-    """Where the scripted person puts the leader at each step: the poses, then the claw open
-    and closed at the last of them (present, or above_tray with the tray)."""
-    names = [name for name, _ in teach_steps(with_tray) if name in POSE_NAMES]
+def dry_run_targets(poses: dict, with_tray: bool = False, grasp: str = "claw",
+                    with_ready: bool = True) -> dict:
+    """Where the scripted person puts the leader at each step: the poses, then (claw only) the
+    claw open and closed at the last of them (present, or above_tray with the tray)."""
+    names = [name for name, _ in teach_steps(with_tray, grasp, with_ready) if name in POSE_NAMES]
     targets = {name: dict(poses[name]) for name in names}
+    if grasp == "suction":
+        return targets
     targets["gripper_open"] = {**poses[names[-1]], "gripper": poses["gripper_open"]}
     targets["gripper_closed"] = {**poses[names[-1]], "gripper": poses["gripper_closed"]}
     return targets
@@ -169,14 +197,21 @@ def _same_pose(a: dict, b: dict) -> bool:
 
 
 def teach(leader, follower, speed_deg_s: float, wait_for=enter_waiter, log=print,
-          with_tray: bool = False, align=None) -> dict:
+          with_tray: bool = False, align=None, grasp: str = "claw", base: dict | None = None) -> dict:
     """Mirror leader -> follower at speed_deg_s; record the follower at each step.
 
     wait_for(step, prompt) returns an object whose is_set() is polled every tick and turns
     true when the person pressed Enter. with_tray also teaches above_tray. align(leader,
     follower), if given, runs first, before the follower is ever commanded (main passes the
     live table for real arms). Claw open and closed less than poses.MIN_CLAW_GAP apart: both
-    claw steps are asked again. Returns the validated poses (raises PosesError)."""
+    claw steps are asked again. Returns the validated poses (raises PosesError).
+
+    grasp "suction" teaches the suction poses (no claw steps; with_tray is refused) and returns
+    them merged into `base`, the poses already in the file (default none): `ready` is asked only
+    if base has none, everything else in base is kept, and the result is validated for suction
+    mode."""
+    if grasp not in GRASPS:
+        raise ValueError(f"grasp must be one of {list(GRASPS)}, got {grasp!r}")
     if not (_is_number(speed_deg_s) and 0 < speed_deg_s <= MAX_SPEED_DEG_S):
         raise ValueError(f"speed_deg_s must be in (0, {MAX_SPEED_DEG_S:g}] deg/s (plan section 17), "
                          f"got {speed_deg_s!r}")
@@ -189,7 +224,8 @@ def teach(leader, follower, speed_deg_s: float, wait_for=enter_waiter, log=print
     cmd = follower.read()
     recorded = {}
     last_name = None
-    steps = teach_steps(with_tray)
+    base = dict(base or {})
+    steps = teach_steps(with_tray, grasp, with_ready="ready" not in base)
     names = [name for name, _ in steps]
     quiet = _QuietClawClamp()
     clamp_log = logging.getLogger(CLAMP_LOGGER)
@@ -233,19 +269,24 @@ def teach(leader, follower, speed_deg_s: float, wait_for=enter_waiter, log=print
         finally:
             clamp_log.removeFilter(quiet)
     poses = {name: recorded[name] for name in POSE_NAMES if name in recorded}
+    if grasp == "suction":
+        return poses_mod.validate({**base, **poses}, "suction")
     poses["gripper_open"] = recorded["gripper_open"]["gripper"]
     poses["gripper_closed"] = recorded["gripper_closed"]["gripper"]
     return poses_mod.validate(poses, "tray" if with_tray else "hand")    # present is always taught
 
 
-def save_with_backup(poses: dict, out: Path) -> Path | None:
+def save_with_backup(poses: dict, out: Path, mode: str | None = None) -> Path | None:
+    """Save poses to `out` (an existing file is copied to data/poses_backup/ first), then
+    reload it. mode is passed to poses.save / poses.load ("suction" for a file that may hold
+    no claw poses)."""
     backup = None
     if out.exists():
         backup = REPO_ROOT / "data" / "poses_backup" / f"poses-{time.strftime('%Y%m%d-%H%M%S')}.json"
         backup.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(out, backup)
-    poses_mod.save(poses, out)
-    poses_mod.load(out)                         # reload check
+    poses_mod.save(poses, out, mode)
+    poses_mod.load(out, mode)                   # reload check
     return backup
 
 
@@ -278,6 +319,9 @@ def main(argv=None) -> int:
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
     parser.add_argument("--with-tray", action="store_true",
                         help="also teach above_tray, for the stretch tray mode (python -m arm.pick run --to tray)")
+    parser.add_argument("--grasp", choices=GRASPS, default="claw",
+                        help="claw (default), or suction: teach the suction cup's poses (for the flat "
+                             "phone; python -m arm.pick run --grasp suction) into the existing poses file")
     parser.add_argument("--dry-run", action="store_true",
                         help="no hardware: a scripted person moves a simulated leader through the "
                              "sim's default poses")
@@ -290,6 +334,19 @@ def main(argv=None) -> int:
         if args.dry_run and out is not None and out.resolve() == poses_mod.DEFAULT_POSES_PATH.resolve():
             raise ValueError(f"a dry run never writes {poses_mod.DEFAULT_POSES_PATH}; "
                              f"pass another --out or leave it out")
+        suction = args.grasp == "suction"
+        if suction and args.with_tray:
+            raise ValueError("--with-tray does not apply to --grasp suction")
+        base = None
+        kept = {}
+        merge_into = out if out is not None else (None if args.dry_run else poses_mod.DEFAULT_POSES_PATH)
+        if suction:     # the poses already in the file the new ones are merged into
+            base = poses_mod.load_partial(merge_into) if merge_into is not None else {}
+        elif merge_into is not None:    # a claw re-teach keeps the suction poses already there
+            try:
+                kept = {k: v for k, v in poses_mod.load_partial(merge_into).items() if k in poses_mod.SUCTION_POSES}
+            except poses_mod.PosesError:
+                kept = {}               # an unreadable file is backed up and replaced, as before
     except ValueError as e:                     # includes pick.ConfigError
         _error(f"error: {e}")
         return 1
@@ -299,7 +356,8 @@ def main(argv=None) -> int:
         if args.dry_run:
             from .sim import DEFAULT_POSES, SimArm, SimLeader
             follower, leader = SimArm(), SimLeader()
-            wait_for = scripted_waiter(leader, follower, dry_run_targets(DEFAULT_POSES, args.with_tray))
+            wait_for = scripted_waiter(leader, follower, dry_run_targets(
+                DEFAULT_POSES, args.with_tray, args.grasp, with_ready="ready" not in (base or {})))
             align = align_mod.scripted_align
         else:
             from .real import RealArm, RealLeader
@@ -310,9 +368,12 @@ def main(argv=None) -> int:
                                frozen=cfg["frozen_joints"])
             wait_for = enter_waiter
             align = align_mod.live_align
-        print(f"teaching at {speed:g} deg/s" + (" (dry run, no hardware)" if args.dry_run else ""),
-              flush=True)
-        poses = teach(leader, follower, speed, wait_for=wait_for, with_tray=args.with_tray, align=align)
+        print(f"teaching {'suction ' if suction else ''}at {speed:g} deg/s"
+              + (" (dry run, no hardware)" if args.dry_run else ""), flush=True)
+        if suction and "ready" in base:
+            print("  the file already has a ready pose: it is kept, not asked again", flush=True)
+        poses = teach(leader, follower, speed, wait_for=wait_for, with_tray=args.with_tray, align=align,
+                      grasp=args.grasp, base=base)
     except KeyboardInterrupt:
         _error("\nstopped; nothing saved")
         return 1
@@ -328,8 +389,15 @@ def main(argv=None) -> int:
     if out is None:
         out = (Path(tempfile.mkdtemp(prefix="arm-teach-dry-run-")) / "poses.json" if args.dry_run
                else poses_mod.DEFAULT_POSES_PATH)
+    if kept:
+        try:
+            poses = poses_mod.validate({**poses, **kept})
+            print(f"  kept the suction poses already in the file: {', '.join(sorted(kept))}", flush=True)
+        except poses_mod.PosesError as e:
+            print(f"  warning: the suction poses in the file are broken ({e}); they are not kept "
+                  f"(the old file is backed up)", flush=True)
     try:
-        backup = save_with_backup(poses, out)
+        backup = save_with_backup(poses, out, "suction" if suction else None)
     except (OSError, poses_mod.PosesError) as e:
         _error(f"not saved: {type(e).__name__}: {e}")
         return 1
