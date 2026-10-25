@@ -86,7 +86,7 @@ def inspect(config_path, role, *, root=ROOT):
         require(path.is_file() and path.stat().st_size > 0, f'missing or empty detector weights: {path}')
         return 'file exists; class names and live accuracy must be verified by publisher/live checks'
     run('phone checkpoint', weights)
-    run('demo object', lambda: require(config.get('items') == ['phone'], 'demo integration currently supports phone only'))
+    run('demo object', lambda: require(config.get('items') in (['phone'], ['phone', 'sock']), 'demo integration supports phone and sock only'))
     return checks
 
 

@@ -145,9 +145,20 @@ def test_selected_item_rejects_serial_injection():
         def stop(self): pass
     brain = Brain()
     with TestClient(create_app(brain)) as client:
-        for payload in [{'item': 'DRIVE 30 30'}, {'item': 'sock'}, {'item': 'phone', 'hand': 'ceiling'}]:
+        for payload in [{'item': 'DRIVE 30 30'}, {'item': 'remote'}, {'item': 'phone', 'hand': 'ceiling'}]:
             assert client.post('/fetch', json=payload).status_code == 422
     assert brain.calls == []
+
+
+def test_selected_sock_reaches_the_brain():
+    class Brain:
+        calls = []
+        def request(self, *args, **kwargs): self.calls.append((args, kwargs))
+        def stop(self): pass
+    brain = Brain()
+    with TestClient(create_app(brain)) as client:
+        assert client.post('/fetch', json={'item': 'sock', 'distance_ft': 3}).status_code == 200
+    assert brain.calls and brain.calls[0][0][0] == 'sock'
 
 @pytest.mark.parametrize('value', [0, -1, 21, '3', True, 'nan', None])
 def test_bad_distance_never_starts(value):
