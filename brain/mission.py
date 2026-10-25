@@ -538,7 +538,7 @@ def build(config, sim):
     cfg = config["base"]
     base = BaseDriver(FakeSerial(max_speed_mm_s=cfg["max_speed_mm_s"]),
                       max_speed_mm_s=cfg["max_speed_mm_s"], max_lift_mm=1000)
-    return Mission(config, base=base, arm=SimArm(), source=FakeDetections())
+    return Mission(config, base=base, arm=SimArm(), source=FakeDetections(labels=config["items"]))
 
 
 def build_real(config):

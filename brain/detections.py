@@ -28,14 +28,14 @@ def validate(message):
 
 
 class FakeDetections:
-    def __init__(self, label="phone"):
-        self.label, self.frame = label, 0
+    def __init__(self, label="phone", labels=None):
+        self.labels, self.frame = list(labels or [label]), 0
 
     def poll(self):
         self.frame += 1
         return dict(t=time.time(), frame=self.frame, items=[dict(
-            label=self.label, conf=.9, bbox_px=[576, 432, 704, 504],
-            centre_px=[640, 468], floor_m=None, depth_m=1.0)])
+            label=label, conf=.9, bbox_px=[576, 432, 704, 504],
+            centre_px=[640, 468], floor_m=None, depth_m=1.0) for label in self.labels])
 
     def close(self):
         pass
