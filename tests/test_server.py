@@ -673,4 +673,10 @@ def test_object_dropdown_contains_selectable_phone():
 
     parser = Options()
     parser.feed(PAGE)
-    assert parser.values == ['', 'phone']
+    assert parser.values == ['', 'phone', 'sock']
+
+
+def test_structured_sock_request(client, brain):
+    response = client.post("/fetch", json={"item": "sock", "hand": "standing"})
+    assert response.status_code == 200
+    assert response.json()["parsed"]["item"] == "sock"

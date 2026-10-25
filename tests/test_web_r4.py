@@ -145,7 +145,7 @@ def test_selected_item_rejects_serial_injection():
         def stop(self): pass
     brain = Brain()
     with TestClient(create_app(brain)) as client:
-        for payload in [{'item': 'DRIVE 30 30'}, {'item': 'sock'}, {'item': 'phone', 'hand': 'ceiling'}]:
+        for payload in [{'item': 'DRIVE 30 30'}, {'item': 'unsupported'}, {'item': 'phone', 'hand': 'ceiling'}]:
             assert client.post('/fetch', json=payload).status_code == 422
     assert brain.calls == []
 
