@@ -163,3 +163,58 @@ fails startup; moving the camera requires recalibration even at the same size.
 If distant phones fail, report the placement table and request additional far
 phone/venue/empty-floor data using plan 10.3's fallback ladder; do not retrain
 automatically.
+
+## P4: measure the floor and pickup target (issue #47)
+
+The camera is reported mounted at 7–8 cm, but tilt/visibility and SW1's pickup
+position still need confirmation. Calibration only makes sense after both are
+fixed. Stop all other camera programs. No tool here moves the arm or base.
+
+1. Generate seven printable 10 cm ArUco markers (DICT_4X4_50):
+   `.venv/perception/bin/python -m perception.calibrate_floor markers`
+   Print SVGs at actual size; verify the black square is 100 mm with a ruler.
+2. Mark the floor origin directly below the front camera. Measure x forward and
+   y left in metres. Lay markers 0–3 around the operating area, including the
+   near pickup area; their centres must surround the points where parking will
+   be used. Put independent check markers 4–6 inside that area. All markers lie
+   flat on the same floor plane; do not infer distances from depth or the photo.
+3. Edit `data/calibration/markers/layout.json`: enter each measured marker-centre
+   `[x,y]` and a `mount_note` with camera height/tilt and mounting description.
+   Null placeholders deliberately prevent fitting invented geometry.
+4. With the RealSense connected, run the camera-only collector:
+
+   ```sh
+   sudo .venv/perception/bin/python -m perception.calibrate_floor collect --layout data/calibration/markers/layout.json
+   ```
+
+   SPACE records a frame where all seven marker IDs are visible; Q cancels.
+   Alternatively use `--image PATH` on an existing P1 colour snapshot without
+   sudo. Keep the same resolution and flip as robot.yaml.
+5. Fit with four points and verify on the other three:
+
+   ```sh
+   .venv/perception/bin/python -m perception.calibrate_floor fit --observations data/calibration/floor_observations.json
+   ```
+
+   It only writes `config/floor_homography.json` if every check is within 2 cm.
+   A failed check means recheck measurements/detection/mount/lens distortion;
+   don't adjust check labels merely to make the fit pass. The report stores
+   errors and all correspondences, not just a passing flag. Existing calibration
+   is protected unless `--replace` is explicit; replacements are backed up.
+6. SW1 establishes the phone pose the gripper can actually pick, with the base
+   stationary. Run the detector, record that box's **bottom-centre pixel**
+   `u=(x1+x2)/2, v=y2` from its UDP message, then run:
+
+   ```sh
+   .venv/perception/bin/python -m perception.calibrate_floor parking --pixel U V
+   ```
+
+   This writes the mapped target into the calibration and updates only the
+   existing `perception.parking_spot_floor_m` line in robot.yaml, backing up both.
+   The target is the detector's box reference point, not necessarily the phone's
+   physical centre. Repeat checks for orientation/case changes, and other objects.
+
+Do not commit measured calibration, photos or logs. Archive them under ignored
+`data/calibration/` for transfer to the robot Mac. Any camera movement invalidates
+P4 even if resolution/flip are unchanged. P4 schema approval is requested in
+REQ-codex-6; physical acceptance and the pickup target remain pending.
