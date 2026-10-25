@@ -475,7 +475,7 @@ footer { display:flex; justify-content:space-between; gap:16px; padding-top:24px
       <form id="ask">
         <input id="text" type="hidden" value="phone">
         <div class="distance-field"><label for="distance">Estimated distance (feet)</label><input id="distance" type="number" inputmode="decimal" min="0" max="20" step="any" placeholder="e.g. 3.5" required aria-describedby="distance-help"><small id="distance-help">More than 0, up to 20 feet. Motor-step estimate, not exact floor distance.</small></div>
-        <div class="select-wrap"><label for="object">What did you drop?</label><select id="object" required><option value="" selected>Select an object</option value="phone">Phone</option></select></div>
+        <div class="select-wrap"><label for="object">What did you drop?</label><select id="object" required><option value="" selected>Select an object</option><option value="phone">Phone</option></select></div>
         <div class="select-wrap"><label for="hand">Hand-off height</label><select id="hand" aria-label="Hand height"><option value="standing" selected>Standing</option><option value="seated">Seated</option></select></div>
         <button class="go" id="go" type="button" aria-disabled="false">Start request ↗</button>
       </form>

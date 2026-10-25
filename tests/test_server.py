@@ -652,3 +652,25 @@ def test_main_modes_are_exclusive_and_help_works(capsys):
         server.main(["--help"])
     assert e.value.code == 0
     assert "--real" in capsys.readouterr().out
+
+
+def test_object_dropdown_contains_selectable_phone():
+    from html.parser import HTMLParser
+    from ui.server import PAGE
+
+    class Options(HTMLParser):
+        in_objects = False
+        values = []
+        def handle_starttag(self, tag, attrs):
+            attrs = dict(attrs)
+            if tag == 'select':
+                self.in_objects = attrs.get('id') == 'object'
+            if tag == 'option' and self.in_objects:
+                self.values.append(attrs.get('value'))
+        def handle_endtag(self, tag):
+            if tag == 'select':
+                self.in_objects = False
+
+    parser = Options()
+    parser.feed(PAGE)
+    assert parser.values == ['', 'phone']
