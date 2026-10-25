@@ -8,7 +8,7 @@
 | Route           | Does                                                              |
 |-----------------|-------------------------------------------------------------------|
 | GET  /          | The page: text box, big STOP button, current state, thumbnails    |
-| POST /request   | {"text": "...", "hand": "seated"|"standing"}: parsed, sent on     |
+| POST /request   | {"text": "...", "hand": "standing"|"seated"}: parsed, sent on     |
 |                 | + "clarify": true, "dialog": [{"question", "answer"}], hand ""   |
 |                 | allowed: may answer {"parsed": {"action": "ask", ...}} instead    |
 | POST /stop      | Stop everything                                                   |
@@ -125,7 +125,7 @@ class Turn(BaseModel):
 
 class RequestBody(BaseModel):
     text: str
-    hand: Any = "seated"      # checked by hand after the STOP check, so "stop" always wins
+    hand: Any = "standing"    # checked by hand after the STOP check, so "stop" always wins
     clarify: bool = False     # True: the robot may ask questions first; hand may then be "" or None
     dialog: list[Turn] = []   # questions already asked for this request and the answers, oldest first
 
@@ -133,7 +133,7 @@ class RequestBody(BaseModel):
 class FetchBody(BaseModel):
     """A selected UI item, never arbitrary serial instructions or model output."""
     item: Literal["phone"]
-    hand: Literal["seated", "standing"] = "seated"
+    hand: Literal["seated", "standing"] = "standing"
 
 
 class _StopCount:
@@ -264,7 +264,7 @@ class FakeBrain:
         self._lock = threading.Lock()
         self._state = "Idle"
         self._item = None
-        self._hand = "seated"
+        self._hand = "standing"
         self._started = None
         self._last_pick = None
         self._message = "Ready"
@@ -467,7 +467,7 @@ button.phone-choice:hover { background:#dce7d1; border-color:var(--go); }
       <h3 class="request-title">What did you drop?</h3><p class="help">Choose an item and we’ll bring it to you.</p>
       <form id="ask">
         <input id="text" type="hidden" value="phone">
-        <div class="select-wrap"><label for="hand">Hand-off height</label><select id="hand" aria-label="Hand height"><option value="seated">Seated</option><option value="standing">Standing</option></select></div>
+        <div class="select-wrap"><label for="hand">Hand-off height</label><select id="hand" aria-label="Hand height"><option value="standing" selected>Standing</option><option value="seated">Seated</option></select></div>
         <button class="go phone-choice" id="go" type="button" aria-disabled="false"><svg width="28" height="36" viewBox="0 0 28 36" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="5" y="2" width="18" height="32" rx="4"/><path d="M10 6h8M11 29h6"/></svg><span>Phone</span><span class="choice-arrow" aria-hidden="true">↗</span></button>
       </form>
       <label id="setting" hidden><input type="checkbox" id="clarify"> Ask me questions first</label>
@@ -561,7 +561,7 @@ $("cancel").addEventListener("click", () => { endConversation(); $("reply").text
 // The "Ask me questions first" setting; the page works without localStorage.
 let handTouched = false;
 try { const v = localStorage.getItem("clarify"); if (v !== null) $("clarify").checked = v === "1"; } catch (e) {}
-const syncHand = () => { if (!handTouched) $("hand").value = "seated"; };
+const syncHand = () => { if (!handTouched) $("hand").value = "standing"; };
 syncHand();
 $("hand").addEventListener("change", () => { handTouched = true; });
 $("clarify").addEventListener("change", () => {
@@ -613,9 +613,9 @@ async function send(raw, direct = false) {
   const sent = answering ? {text: convo.text, dialog: [...convo.dialog, {question: convo.pending, answer: text}]}
                          : {text, dialog: []};
   const hand = $("hand").value;
-  const payload = direct ? {item: "phone", hand: hand || "seated"}
+  const payload = direct ? {item: "phone", hand: hand || "standing"}
                   : clarify ? {text: sent.text, hand, clarify: true, dialog: sent.dialog}
-                          : {text: sent.text, hand: hand || "seated"};
+                          : {text: sent.text, hand: hand || "standing"};
   asking = true; setAskBusy(); $("reply").textContent = "…";
   try {
     const r = await call(direct ? "/fetch" : "/request", {method: "POST", headers: {"Content-Type": "application/json"},

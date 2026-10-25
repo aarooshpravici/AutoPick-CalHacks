@@ -49,7 +49,7 @@ CONFIG_PATH = REPO_ROOT / "config" / "robot.yaml"
 DEFAULT_ITEMS = ["phone", "glasses", "pill_bottle", "remote", "pen", "sock"]
 
 HANDS = ("seated", "standing")
-DEFAULT_HAND = "seated"
+DEFAULT_HAND = "standing"     # held a little high is easy to take, even for someone seated
 MAX_QUESTIONS = 4       # per request; clarify_request enforces it
 HAND_QUESTION = "Are you sitting or standing?"
 MAX_OPTIONS = 4
