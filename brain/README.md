@@ -74,3 +74,22 @@ search exhaustion, UDP/replay and existing UI routes. No real motion is enabled.
   keep someone at E-stop, and explicitly clear motion before search trials.
 
 These are prerequisites, not claims that the hardware gates have passed.
+
+### Measured navigation (issue #47 draft)
+
+Real UI mode uses `build(config, sim=False)` only after P4's measured calibration,
+recorded parking target and on-base handoff poses exist. HW1 must finish wiring,
+verify wheel directions, measure loaded speed and turning, then record
+`base.wiring_confirmed` and `base.drive_calibrated`. Defaults remain false.
+A person must clear the area before starting real mode. The agent has not run it.
+The existing UI real-mode confirmation still applies.
+
+Search uses commanded step counts, which cannot detect missed steps or skid slip.
+Parking stops on stale or invalid floor data and requires three fresh settled frames.
+The firmware must acknowledge STOP before the arm starts. Missing acknowledgment
+fails the mission. First real scripted picks run at no more than 25 degrees/second.
+The wrist-roll exclusion remains in force; no wrist camera or ACT model is required.
+
+Physical acceptance still requires B5 8/10 parking trials, B6 full-heading search,
+five complete M2 runs and measured STOP response within 0.5 s, including midmission.
+Simulation results do not satisfy these checks.

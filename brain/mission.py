@@ -1,4 +1,4 @@
-"""M1 simulated mission and UI Brain adapter. Real navigation awaits P4/B5/B6."""
+"""M1 mission and UI adapter, with gated measured navigation."""
 from __future__ import annotations
 
 import argparse
@@ -36,16 +36,18 @@ class SimNavigation:
 class Mission:
     def __init__(self, config, *, base, arm, source, poses=DEFAULT_POSES,
                  navigator_factory=SimNavigation, pick=pick_to_hand, log_dir=None,
-                 period=.1):
+                 period=.1, simulated=True):
         self.config, self.base, self.arm, self.source = config, base, arm, source
         self.poses, self.pick, self.navigator_factory = poses, pick, navigator_factory
         self.period = period
+        self.simulated = simulated
+        self._base_status = None
         self._lock = threading.Lock()  # Never held during file, serial or arm I/O.
         self._closed = threading.Event()
         self._wake_io = threading.Event()
         self._token = threading.Event()
         self._generation = 0
-        self._state, self._message, self._item = "Idle", "Ready (simulation)", None
+        self._state, self._message, self._item = "Idle", "Ready (simulation)" if simulated else "Ready", None
         self._detection = self._last_pick = None
         self._seen = self._attempts = 0
         self._last_frame = None
@@ -72,7 +74,7 @@ class Mission:
         self._io = threading.Thread(target=self._base_io, daemon=True, name="mission-base")
         self._loop = threading.Thread(target=self._run, daemon=True, name="mission-loop")
         self._logger.start(); self._io.start(); self._loop.start()
-        self._event("started", simulated=True)
+        self._event("started", simulated=simulated)
 
     def _event(self, kind, **fields):
         self._events.put(dict(t=time.time(), event=kind, **fields))
@@ -159,7 +161,7 @@ class Mission:
                 cancelled = self._token.is_set()
             try:
                 if halt:
-                    self.base.stop()
+                    self.base.stop_and_wait()
                     self._event("serial", command="STOP")
                     with self._lock:
                         self._stop_completed = stop_ticket
@@ -167,6 +169,8 @@ class Mission:
                     self.base.drive(*desired[1])
                     self._event("serial", command="DRIVE", speeds=desired[1])
                 status = self.base.status(timeout=0)
+                with self._lock:
+                    self._base_status = status
                 if time.monotonic() - status.received_at > .3 or status.estop:
                     raise RuntimeError("stale base status or E-stop")
             except Exception as error:
@@ -197,7 +201,8 @@ class Mission:
                                    {"pick": "Picking up", "present": "Presenting", "wait_for_take": "Please take the item"}[state])
         try:
             result = self.pick(self.arm, self.poses,
-                               speed_deg_s=self.config["arm"]["move_speed_deg_s"],
+                               speed_deg_s=(self.config["arm"]["move_speed_deg_s"] if self.simulated else
+                                            min(25, self.config["arm"]["move_speed_deg_s"])),
                                handoff_timeout_s=self.config["handoff"]["timeout_s"],
                                handoff_grip=self.config["handoff"].get("grip", "squeeze"),
                                stop_event=token, on_state=on_state,
@@ -249,7 +254,13 @@ class Mission:
                     else:
                         self._halt()
                         self._state_to("Failed", f"Pick failed: {result['result']}")
+            if hasattr(self._navigator, "observe"):
+                age = float("inf") if self._last_frame is None else time.time() - self._last_frame[1]
+                self._navigator.observe(self._last_frame, age, self._base_status)
             if self._state in ("Search", "Approach"):
+                if self._base_status is None:
+                    self._halt()
+                    return
                 if self._pick_thread is not None and self._pick_thread.is_alive():
                     self._halt()
                     return  # A replaced mission must finish holding the arm first.
@@ -258,11 +269,12 @@ class Mission:
                     self._state_to("Failed", "Camera lost")
                 elif self._state == "Search":
                     if self._seen >= 5:
-                        self._state_to("Approach", "Approaching (simulated parking)")
+                        self._halt()
+                        self._state_to("Approach", "Approaching (simulated parking)" if self.simulated else "Approaching measured pickup spot")
                     else:
                         exhausted, speeds = self._navigator.search()
                         if exhausted:
-                            self._halt(); self._state_to("Failed", "Two simulated turns; item not found")
+                            self._halt(); self._state_to("Failed", "Two simulated turns; item not found" if self.simulated else "Search exhausted; item not found")
                         else:
                             self._drive(speeds)
                 elif now - self._last_seen > 1:
@@ -287,8 +299,7 @@ class Mission:
             elif self._state == "Failed" and not self._io_error and now - self._failed_at > 1:
                 self._state_to("Idle", self._message)
         if start_pick:
-            # Stop the simulated base before arm work starts. No real-mode builder
-            # is exposed until measured navigation and physical interlocks exist.
+            # The firmware STOP acknowledgment must precede arm work.
             self._pick_thread = threading.Thread(target=self._start_pick, args=start_pick,
                                                  daemon=True, name="mission-pick")
             self._pick_thread.start()
@@ -323,11 +334,53 @@ class Mission:
 
 def build(config, sim):
     if not sim:
-        raise RuntimeError("Real M1 is gated on P4 calibration and B5/B6 navigation; use --sim")
+        return build_real(config)
     cfg = config["base"]
     base = BaseDriver(FakeSerial(max_speed_mm_s=cfg["max_speed_mm_s"]),
                       max_speed_mm_s=cfg["max_speed_mm_s"], max_lift_mm=1000)
     return Mission(config, base=base, arm=SimArm(), source=FakeDetections())
+
+
+def build_real(config):
+    # Validate every prerequisite before opening any serial device.
+    from arm.poses import load
+    from perception.floor import FloorMap
+    from brain.navigation import RealNavigation
+    cfg = config["base"]
+    if not cfg.get("wiring_confirmed") or not cfg.get("drive_calibrated"):
+        raise RuntimeError("Real M1 requires P4 and completed wiring/loaded-drive checks")
+    if "XXXX" in cfg["serial_port"]:
+        raise RuntimeError("configure the measured Uno R4 serial port")
+    floor = FloorMap.load(ROOT / "config/floor_homography.json",
+                          colour_size=config["realsense"]["colour"], flip=config["realsense"]["flip"])
+    import math
+    if math.dist(floor.parking(), config["perception"]["parking_spot_floor_m"]) > 1e-6:
+        raise RuntimeError("P4 parking target differs from robot.yaml")
+    poses = load(ROOT / "config/poses.json", mode="hand")
+    factory = lambda: RealNavigation(config, floor)
+    factory()  # Validate navigation before ports are opened.
+    base = arm = source = None
+    try:
+        import serial
+        from arm.real import RealArm
+        source = UdpDetections(config["perception"]["detections_udp"])
+        port = serial.Serial(cfg["serial_port"], baudrate=cfg["baud"], timeout=.05, write_timeout=.1)
+        base = BaseDriver(port, max_speed_mm_s=cfg["max_speed_mm_s"], max_lift_mm=1000)
+        base.status(timeout=3)
+        base.stop_and_wait()
+        arm_cfg = config["arm"]
+        arm = RealArm(arm_cfg["follower_port"], arm_cfg["follower_id"],
+                      float(arm_cfg["max_relative_target_deg"]), frozen=arm_cfg.get("frozen_joints", ()))
+        return Mission(config, base=base, arm=arm, source=source, poses=poses,
+                       navigator_factory=factory, simulated=False)
+    except BaseException:
+        for resource in (base, source, arm):
+            if resource is not None:
+                try:
+                    resource.close()
+                except Exception:
+                    pass
+        raise
 
 
 def main(argv=None):
