@@ -1,38 +1,27 @@
 #include <Arduino.h>
 #include "controller.h"
 #include "pinmap.h"
+#include "stepper.h"
 
 Controller controller(wiring::confirmed, wiring::max_speed_mm_s,
                       wiring::acceleration_mm_s2, wiring::stop_acceleration_mm_s2);
-const float steps_per_mm = wiring::microsteps_per_turn / (PI * wiring::wheel_diameter_mm);
+const float steps_per_mm = wiring::half_steps_per_rev / (PI * wiring::wheel_diameter_mm);
 
 struct Wheel {
-    int step, dir, enable;
-    bool inverted, high = false;
-    uint32_t next = 0, raised = 0;
-    int32_t steps = 0;
+    const int* pins;
+    bool inverted;
+    CoilStepper motor;
     void begin() {
-        pinMode(enable, OUTPUT);
-        digitalWrite(enable, wiring::enable_active_low ? HIGH : LOW);
-        pinMode(step, OUTPUT); digitalWrite(step, LOW);
-        pinMode(dir, OUTPUT); digitalWrite(dir, LOW);
+        for (int i = 0; i < 4; ++i) { pinMode(pins[i], OUTPUT); digitalWrite(pins[i], LOW); }
     }
     void update(float speed, uint32_t now, bool emergency) {
-        if (high && uint32_t(now - raised) >= 4) { digitalWrite(step, LOW); high = false; }
-        digitalWrite(enable, (emergency == wiring::enable_active_low) ? HIGH : LOW);
-        if (emergency || speed == 0) { next = now; return; }
-        if (!high && int32_t(now - next) >= 0) {
-            digitalWrite(dir, (speed < 0) != inverted ? HIGH : LOW);
-            // Direction setup time for a provisional STEP/DIR driver.
-            delayMicroseconds(3);
-            digitalWrite(step, HIGH); high = true; raised = micros();
-            steps += speed > 0 ? 1 : -1;
-            next = now + uint32_t(1000000.0f / (fabsf(speed) * steps_per_mm));
-        }
+        // Holding means retaining the last phase, never releasing coils on STOP.
+        if (motor.update(emergency ? 0 : speed, now, steps_per_mm, inverted))
+            for (int i = 0; i < 4; ++i) digitalWrite(pins[i], (motor.mask >> i) & 1);
     }
 };
-Wheel left{wiring::left_step, wiring::left_dir, wiring::left_enable, wiring::invert_left};
-Wheel right{wiring::right_step, wiring::right_dir, wiring::right_enable, wiring::invert_right};
+Wheel left{wiring::left_coils, wiring::invert_left, {}};
+Wheel right{wiring::right_coils, wiring::invert_right, {}};
 char input[96];
 size_t used = 0;
 bool overflow = false;
@@ -52,13 +41,13 @@ void setup() {
     Serial.begin(115200);
     if (wiring::confirmed) {
         left.begin(); right.begin();
-        pinMode(wiring::estop_sense, INPUT_PULLUP);
+        if (wiring::estop_sense >= 0) pinMode(wiring::estop_sense, INPUT_PULLUP);
     }
 }
 
 void loop() {
     const uint32_t now = millis();
-    const bool emergency = wiring::confirmed &&
+    const bool emergency = wiring::confirmed && wiring::estop_sense >= 0 &&
         (digitalRead(wiring::estop_sense) == (wiring::estop_active_low ? LOW : HIGH));
     controller.tick(now, emergency);
     // Bound RX work per loop so an input flood cannot starve the watchdog.
@@ -92,7 +81,7 @@ void loop() {
     if (uint32_t(now - last_status) >= 100) {
         last_status = now;
         char status[96];
-        snprintf(status, sizeof(status), "STAT %ld %ld 0 0 %d", long(left.steps), long(right.steps), int(emergency));
+        snprintf(status, sizeof(status), "STAT %ld %ld 0 0 %d", long(left.motor.steps), long(right.motor.steps), int(emergency));
         reply(status);
     }
 }

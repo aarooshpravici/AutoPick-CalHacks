@@ -184,7 +184,9 @@ class Mission:
                 return
 
     def _drive(self, speeds):
-        self._desired = (self._generation, speeds)
+        limit = self.config["base"]["max_speed_mm_s"]
+        scale = max(1, max(abs(value) for value in speeds) / limit)
+        self._desired = (self._generation, tuple(value / scale for value in speeds))
         self._wake_io.set()
 
     def _start_pick(self, generation, token):

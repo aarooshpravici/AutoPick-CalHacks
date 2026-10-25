@@ -67,7 +67,8 @@ class BaseDriver:
         max_lift = max(lift["seated_hand_mm"], lift["standing_hand_mm"])
         if fake:
             port = FakeSerial(max_speed_mm_s=base["max_speed_mm_s"], max_lift_mm=max_lift,
-                              wheel_diameter_mm=base["wheel_diameter_mm"])
+                              wheel_diameter_mm=base["wheel_diameter_mm"],
+                              steps_per_rev=base.get("half_steps_per_rev", 1600))
         else:
             import serial
             port = serial.Serial(base["serial_port"], baudrate=base["baud"],
@@ -250,7 +251,7 @@ class FakeSerial:
     verifies protocol behavior, not lift mechanics or electrical safety.
     """
     def __init__(self, *, max_speed_mm_s=200, max_lift_mm=1000, wheel_diameter_mm=72,
-                 clock=time.monotonic, has_lift=False, lift_speed_mm_s=None):
+                 clock=time.monotonic, has_lift=False, lift_speed_mm_s=None, steps_per_rev=1600):
         self.clock = clock
         self.max_speed = max_speed_mm_s
         self.max_lift = max_lift_mm
@@ -261,7 +262,7 @@ class FakeSerial:
         self.lift_target = None
         self.lift_enabled = False
         self._homing = False
-        self.steps_per_mm = 1600 / (math.pi * wheel_diameter_mm)
+        self.steps_per_mm = steps_per_rev / (math.pi * wheel_diameter_mm)
         self.left = self.right = self.lift_mm = self.weight = 0.0
         self.left_steps = self.right_steps = 0.0
         self.estop = False

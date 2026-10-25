@@ -1,55 +1,61 @@
-# B3 wheels-only ESP32 firmware
+# B3 Uno R4 WiFi / 28BYJ-48 firmware (issue #47)
 
-Implements plan 9.5 at 115200 baud. Left/right commands each control a pair of
-wheels. `STAT` is emitted every 100 ms; lift/weight fields are zero. All stretch
-commands return `ERR no lift`. A valid DRIVE must arrive at least every 300 ms;
-the watchdog cuts pulse generation at that deadline. PING and invalid commands
-do not renew it. STOP ramps down quickly, and E-stop stops immediately. Release
-of E-stop does not resume an old command. Malformed commands stop motion.
+This replaces the earlier ESP32 STEP/DIR draft. The RA4M1 is the controller;
+the R4's ESP32 WiFi coprocessor is not used. Four 5 V 28BYJ-48 motors each have
+one ULN2003-style board. Left IN1..IN4 signals: D8, D9, D10, D11; right:
+D2, D3, D4, D5. Two drivers on a side share inputs, not motor outputs. Motors
+use the buck's 5 V rail, never GPIO supply. HW1 must check ratings and grounds.
 
-**Not configured for the physical robot yet.** `include/pinmap.h` has disabled
-outputs and -1 pins. The provisional backend is STEP/DIR for paired stepper
-drivers; use it only if HW1 confirms that motor/driver type. DC motors require a
-matching H-bridge backend (and calibrated speed control/encoders), not these
-signals. Confirm the board model too: esp32dev is a compile target, not a claim
-about Darren's board. Until confirmed, DRIVE returns `ERR unconfigured motors`.
+**Do not energise the reported suspect driver boards.** Wiring is unfinished
+and replacements may be needed. No upload or powered test has been performed.
+`base.wiring_confirmed` stays false, so DRIVE is refused and coils stay off.
+After repair and HW1/SW2 clearance, set it true, regenerate and build for upload.
 
-HW1 must provide the motor/driver models, pin map, polarity, pair wiring,
-microsteps, wheel diameter, track and wheelbase, and isolated E-stop sense
-contact. Never feed 12 V into a GPIO. Check usable pins, boot-strapping and
-input-only pin restrictions against the actual board before setting confirmed.
-No pin values have been guessed. Both left drivers share one step/direction
-signal; both right drivers share another. STAT counts emitted pulses, not
-encoder feedback; it cannot detect wheel slip or a stalled motor.
+The protocol stays at 115200 baud. Wheel speeds are mm/s and STAT counts emitted
+half steps, not encoders. Stretch commands return `ERR no lift`; lift/weight
+fields are zero. A 300 ms timeout since the last valid DRIVE stops stepping;
+PING/malformed traffic cannot renew it. STOP decelerates quickly then replies
+OK STOP. Both STOP and watchdog keep the last coil phase energised to hold;
+physical power removal cannot hold position. Coils are off at boot.
 
-Build only (no upload):
+Pin map, direction inversions, nominal 4096 half steps/rev, wheel geometry and
+limits are generated from config/robot.yaml. Speed is provisionally capped at
+30 mm/s (not the old 200), with 30 mm/s² normal and 300 mm/s² stop acceleration.
+Measured loaded speed and turn rate are still required. Each loop emits at most
+one half step per wheel, never blocks for a motor move, and bounds serial work.
+Serial TX congestion may drop a reply; the Mac treats a missing reply as fault.
+
+No E-stop sense wire is specified (`estop_sense_pin: -1`). STAT estop=0 therefore
+means uninstrumented, NOT verified safe. The physical switch must cut motor
+power, including the 5 V buck feed. If HW1 supplies an isolated/contact sense
+wire, configure a free pin; never feed 12 V into the Uno pin.
+
+Build without uploading:
 
 ```sh
-python3.12 -m venv .venv/platformio
-.venv/platformio/bin/pip install platformio==6.1.18
+.venv/bin/python base/firmware/generate_config.py
+.venv/bin/python base/firmware/generate_config.py --check
 .venv/platformio/bin/pio run -d base/firmware
 ```
 
-The platform is pinned to espressif32 6.12.0 with Arduino. PlatformIO reference:
-https://docs.platformio.org/en/latest/platforms/espressif32.html
+PlatformIO Core 6.1.18; pinned `renesas-ra@1.9.0`, board `uno_r4_wifi`:
+https://docs.platformio.org/en/latest/boards/renesas-ra/uno_r4_wifi.html
 
-Native protocol checks, no board or PlatformIO required:
+Native tests (no board):
 
 ```sh
-c++ -std=c++17 -Wall -Wextra -Werror -I base/firmware/include \
-  base/firmware/test/controller_test.cpp -o /tmp/autopick-firmware-tests
-/tmp/autopick-firmware-tests
+c++ -std=c++17 -Wall -Wextra -Werror -I base/firmware/include base/firmware/test/controller_test.cpp -o /tmp/controller-test
+/tmp/controller-test
+c++ -std=c++17 -Wall -Wextra -Werror -I base/firmware/include base/firmware/test/stepper_test.cpp -o /tmp/stepper-test
+/tmp/stepper-test
 ```
 
-Serial RX work is bounded per loop, lines are bounded to 95 bytes, and TX is
-only attempted when buffer space is available, so a serial flood cannot block
-the watchdog. A congested TX buffer may drop replies/status; the Mac must treat
-missing responses as a fault. The loop generates at most one pulse per wheel
-per iteration; verify achievable speed and watchdog timing on the actual board.
+Bench checklist, ONLY after wiring repair and explicit area-clear approval:
+1. Wheels raised: PING, STAT; low-speed DRIVE each pair; verify coil order/direction.
+2. STOP and hold; unplug USB while driving and measure stopping <=300 ms.
+3. On the loaded base, measure straight travel/time and turning without stalls.
+4. Measure half steps/rev and effective track width; replace provisional limits.
+5. Test physical E-stop cuts both arm and wheel motor rails. Record evidence in #47.
 
-Bench acceptance needs SW2's explicit area-clear go-ahead and HW1's checked
-power/E-stop wiring. First lift the wheels clear, verify direction for each
-pair at <=100 mm/s, STOP, and USB-loss stopping within 300 ms. Then check turning
-in place on the actual floor for scrubbing/stalling. Record measured timings;
-native tests and a successful compile do not satisfy these hardware checks.
-Lift firmware/load-cell calibration remain stretch work, not implemented here.
+A compile/native test does not satisfy these checks. Slow/weak steppers may make
+a staged, manually parked arm demo the practical fallback.
