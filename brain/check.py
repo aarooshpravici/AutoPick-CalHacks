@@ -42,10 +42,11 @@ def inspect(config_path, role, *, root=ROOT):
             require(found == '0.6.2', f'LeRobot 0.6.2 required; found {found}')
             return found
         run('LeRobot version', lerobot_version)
-        from brain.mission import grasp_settings
+        from brain.mission import grasp_settings, handoff_timeout
         def poses():
             from arm.poses import load
             grasp, _ = grasp_settings(config)
+            handoff_timeout(config)
             load(root / 'config/poses.json', mode='suction' if grasp == 'suction' else 'hand')
             return f'{grasp} pose schema valid; on-base teaching still needs human verification'
         run('grasp and poses', poses)

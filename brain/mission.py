@@ -36,6 +36,14 @@ def grasp_settings(config):
     return grasp, options
 
 
+def handoff_timeout(config):
+    """Validate the pick-thread timeout up front so a bad value fails before any motion."""
+    value = config.get("handoff", {}).get("timeout_s")
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+        raise ValueError("handoff.timeout_s must be a positive, finite number of seconds")
+    return value
+
+
 class SimNavigation:
     """A navigation stand-in, not measured parking or a real search controller."""
     def __init__(self):
@@ -72,7 +80,9 @@ class Mission:
         self._generation = 0
         self._state, self._message, self._item = "Idle", "Ready (simulation)" if simulated else "Ready", None
         self._detection = self._last_pick = None
-        self._seen = self._attempts = 0
+        self._seen = self._attempts = self._researches = 0
+        self._ready_at = None  # Monotonic time of the last arm-ready reading.
+        self._arm_epoch = 0  # Bumped when a pick starts, so an older reading cannot count as ready.
         self._last_frame = None
         self._last_camera = time.monotonic()
         self._last_seen = self._last_camera
@@ -149,7 +159,8 @@ class Mission:
             self._limit_pending = (self._generation, (20 if max_distance_ft is None else max_distance_ft) * 304.8)
             self._limit_ready = False
             self._boundary_started = None
-            self._seen = self._attempts = 0
+            self._seen = self._attempts = self._researches = 0
+            self._ready_at = None
             self._last_frame = None
             self._last_camera = self._last_seen = time.monotonic()
             self._navigator = self.navigator_factory()
@@ -187,6 +198,31 @@ class Mission:
                    abs(position[joint] - self.poses['ready'][joint]) <= 5
                    for joint in joints if joint not in frozen)
 
+    def _arm_refuse(self, generation, message):
+        with self._lock:
+            if generation == self._generation:
+                self._token.set()
+                self._limit_pending = None
+                self._halt()
+                self._state_to("Stopped", message)
+
+    def _arm_gate(self, generation, epoch, max_age):
+        """True only with the arm at taught ready, read at most max_age s ago; else stop the request."""
+        now = time.monotonic()
+        ready_at = self._ready_at
+        if max_age and ready_at is not None and now - ready_at <= max_age:
+            return True
+        try:
+            ready = self._arm_ready()
+        except Exception as error:  # An arm fault is not a base/control-connection failure.
+            self._arm_refuse(generation, f"Arm unreadable; base motion refused ({str(error)[:80]})")
+            return False
+        with self._lock:
+            self._ready_at = now if ready and epoch == self._arm_epoch else None
+        if not ready:
+            self._arm_refuse(generation, "Arm is not at taught ready pose; return it safely before driving")
+        return ready
+
     def _base_io(self):
         while not self._closed.is_set():
             self._wake_io.wait(.05)
@@ -201,6 +237,9 @@ class Mission:
                 cancelled = self._token.is_set()
                 pending_limit = self._limit_pending
                 arm_busy = self._pick_thread is not None and self._pick_thread.is_alive()
+                epoch = self._arm_epoch
+                if arm_busy:
+                    self._ready_at = None
             try:
                 if halt:
                     self.base.stop_and_wait()
@@ -208,24 +247,17 @@ class Mission:
                     with self._lock:
                         self._stop_completed = stop_ticket
                 elif pending_limit and pending_limit[0] == generation and not cancelled and not arm_busy:
-                    ready = self._arm_ready()  # Read only, after STOP, before any base motion.
-                    if not ready:
-                        with self._lock:
-                            if generation == self._generation:
-                                self._token.set()
-                                self._limit_pending = None
-                                self._halt()
-                                self._state_to("Stopped", "Arm is not at taught ready pose; return it safely before driving")
-                    else:
+                    if self._arm_gate(generation, epoch, 0):  # Read only, after STOP, before any base motion.
                         self.base.set_travel_limit(pending_limit[1])
                         with self._lock:
                             if generation == self._generation and not self._token.is_set():
                                 self._limit_pending = None
                                 self._limit_ready = True
                         self._event("serial", command="LIMIT", mm=pending_limit[1])
-                elif desired and desired[0] == generation and not cancelled:
-                    self.base.drive(*desired[1])
-                    self._event("serial", command="DRIVE", speeds=desired[1])
+                elif desired and desired[0] == generation and not cancelled and not arm_busy:
+                    if not any(desired[1]) or self._arm_gate(generation, epoch, .2):
+                        self.base.drive(*desired[1])
+                        self._event("serial", command="DRIVE", speeds=desired[1])
                 status = self.base.status(timeout=0)
                 with self._lock:
                     self._base_status = status
@@ -371,6 +403,10 @@ class Mission:
                             self._drive(speeds)
                 elif now - self._last_seen > 1:
                     self._halt(); self._seen = 0
+                    if self._researches >= 3:  # Rebuilt navigators reset their own budgets; bound it here.
+                        self._state_to("Failed", "Item repeatedly lost; stopping")
+                        return
+                    self._researches += 1
                     self._navigator = self.navigator_factory()
                     self._parking_stop_ticket = None
                     self._state_to("Search", "Item lost; searching again")
@@ -386,6 +422,8 @@ class Mission:
                         elif self._stop_completed >= self._parking_stop_ticket:
                             self._attempts += 1
                             self._state_to("Pick", "Picking up")
+                            self._arm_epoch += 1
+                            self._ready_at = None
                             start_pick = self._generation, self._token
                     else:
                         self._parking_stop_ticket = None  # Any renewed approach needs a new stopped acknowledgment.
@@ -428,6 +466,7 @@ class Mission:
 
 def build(config, sim):
     grasp_settings(config)
+    handoff_timeout(config)
     if not sim:
         return build_real(config)
     cfg = config["base"]
@@ -442,6 +481,7 @@ def build_real(config):
     from perception.floor import FloorMap
     from brain.navigation import RealNavigation
     grasp, _ = grasp_settings(config)
+    handoff_timeout(config)
     cfg = config["base"]
     if cfg.get("wiring_confirmed") is not True or cfg.get("drive_calibrated") is not True:
         raise RuntimeError("Real M1 requires P4 and completed wiring/loaded-drive checks")
