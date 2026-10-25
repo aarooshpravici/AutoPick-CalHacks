@@ -338,9 +338,15 @@ def main(argv=None) -> int:
         if suction and args.with_tray:
             raise ValueError("--with-tray does not apply to --grasp suction")
         base = None
+        kept = {}
+        merge_into = out if out is not None else (None if args.dry_run else poses_mod.DEFAULT_POSES_PATH)
         if suction:     # the poses already in the file the new ones are merged into
-            merge_into = out if out is not None else (None if args.dry_run else poses_mod.DEFAULT_POSES_PATH)
             base = poses_mod.load_partial(merge_into) if merge_into is not None else {}
+        elif merge_into is not None:    # a claw re-teach keeps the suction poses already there
+            try:
+                kept = {k: v for k, v in poses_mod.load_partial(merge_into).items() if k in poses_mod.SUCTION_POSES}
+            except poses_mod.PosesError:
+                kept = {}               # an unreadable file is backed up and replaced, as before
     except ValueError as e:                     # includes pick.ConfigError
         _error(f"error: {e}")
         return 1
@@ -383,6 +389,13 @@ def main(argv=None) -> int:
     if out is None:
         out = (Path(tempfile.mkdtemp(prefix="arm-teach-dry-run-")) / "poses.json" if args.dry_run
                else poses_mod.DEFAULT_POSES_PATH)
+    if kept:
+        try:
+            poses = poses_mod.validate({**poses, **kept})
+            print(f"  kept the suction poses already in the file: {', '.join(sorted(kept))}", flush=True)
+        except poses_mod.PosesError as e:
+            print(f"  warning: the suction poses in the file are broken ({e}); they are not kept "
+                  f"(the old file is backed up)", flush=True)
     try:
         backup = save_with_backup(poses, out, "suction" if suction else None)
     except (OSError, poses_mod.PosesError) as e:
