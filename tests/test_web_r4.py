@@ -132,7 +132,7 @@ def test_link_probe_never_drives(wire):
     driver, commands = wire
     result = check(driver)
     assert result['pong'] and result['stop_acknowledged']
-    assert commands == ['\x18', 'PING', 'STOP', 'PING', 'INFO']
+    assert commands == ['\x18', 'PING', 'STOP', 'PING', 'PING', 'INFO']
     assert result['firmware']['limit']
     assert not result['firmware']['estop_sensed']
     assert result['warnings']

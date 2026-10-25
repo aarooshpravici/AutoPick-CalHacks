@@ -174,6 +174,25 @@ def test_stale_stop_ack_is_drained_then_real_ack_accepted():
         assert driver._stop_acked == driver._stop_generation == 1
 
 
+def test_synchronize_absorbs_ack_for_stop_left_pending_by_earlier_session():
+    port = FakeSerial()
+    original = port.write
+
+    def write(data):
+        result = original(data)
+        if data == b'STOP\n':  # The earlier session's pending STOP is acknowledged alongside ours.
+            with port._lock:
+                port._lines.append(b'OK STOP\n')
+        return result
+    port.write = write
+    with BaseDriver(port, max_speed_mm_s=30, max_lift_mm=1000) as driver:
+        driver.status(timeout=1)
+        driver.synchronize()
+        assert driver._stop_acked == driver._stop_generation
+        port.write = original
+        driver.stop_and_wait()
+
+
 def test_extra_stop_ack_is_a_link_fault():
     port = FakeSerial()
     with BaseDriver(port, max_speed_mm_s=30, max_lift_mm=1000) as driver:

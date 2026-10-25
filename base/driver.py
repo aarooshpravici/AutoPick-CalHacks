@@ -195,11 +195,18 @@ class BaseDriver:
     def synchronize(self, timeout=.4):
         """Cancel partial RX text and halt, then require a fresh STOP acknowledgment."""
         self._send("\x18")
+        self._realign_stop_acks(timeout)
+        # A STOP left pending by an earlier session is acknowledged together with ours once
+        # stopped (firmware acks only at zero speed), so tolerate it here, then drain again.
+        self.stop_and_wait(timeout=timeout, allow_extra=True)
+        time.sleep(.02)
+        self._realign_stop_acks(timeout)
+
+    def _realign_stop_acks(self, timeout):
         # Replies are ordered: once PONG arrives, stale OK STOPs from before it were counted.
         self._request("PING", lambda reply: reply == "PONG", timeout)
         with self._condition:
             self._stop_acked = self._stop_generation
-        self.stop_and_wait(timeout=timeout)
 
     def firmware_info(self):
         reply = self._request("INFO", lambda reply: reply.startswith("INFO "))
@@ -265,7 +272,7 @@ class BaseDriver:
             self._send("STOP")
             self._condition.notify_all()
 
-    def stop_and_wait(self, timeout=.4):
+    def stop_and_wait(self, timeout=.4, *, allow_extra=False):
         """Wait for firmware's stopped acknowledgment without blocking UI callers."""
         deadline = time.monotonic() + timeout
         with self._condition:
@@ -273,7 +280,7 @@ class BaseDriver:
             ticket = self._stop_generation
             while True:
                 self._healthy()
-                if self._stop_acked > self._stop_generation:
+                if self._stop_acked > self._stop_generation and not allow_extra:
                     self._fault = RuntimeError("unexpected extra STOP acknowledgment")
                     raise self._fault
                 if self._stop_acked >= ticket:

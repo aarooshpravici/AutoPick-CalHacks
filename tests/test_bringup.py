@@ -20,7 +20,7 @@ def test_jog_directions_are_budgeted_then_stopped(config, direction, signs):
     with BaseDriver(port, max_speed_mm_s=30, max_lift_mm=1000) as driver:
         result = jog(driver, config, direction, 5, .08, 10, real=False)
         assert result['stop_acknowledged']
-        assert port.commands[:5] == ['\x18', 'PING', 'STOP', 'INFO', 'LIMIT 10.000000']
+        assert port.commands[:6] == ['\x18', 'PING', 'STOP', 'PING', 'INFO', 'LIMIT 10.000000']
         assert f'DRIVE {5*signs[0]} {5*signs[1]}' in port.commands
         assert port.commands[-1] == 'STOP'
         assert port.left == port.right == 0
