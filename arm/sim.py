@@ -18,6 +18,15 @@ arriving, and the claw closes just the same. pick.py reports that as "dropped"
 within pick.TAKE_SETTLE_S of arriving; later it can't be told from a take (the
 known limit in plan 10.7).
 
+Suction (pick_to_hand(..., grasp="suction")): a passive cup, no pump and no sensor, so the
+only thing the arm can see is its own joints. Pressing the cup on the object (the arm held
+at suction_press, every other joint free) for seal_after_s makes it stick (object "suction");
+a press cut short, or one of the first miss_first, doesn't stick (a case that won't seal).
+The claw plays no part. slip_on_lift drops the object near suction_lift. At suction_present
+the same take_after_s / never_take / slip_at_present_after_s rules apply as for the claw.
+Nothing about this is readable from the arm: pick.py reports "taken" after its timed hold
+whether or not the cup held anything; tests look at arm.object.
+
 The sim runs on a virtual clock: pick.py sleeps through arm.clock, and each sleep
 advances the simulation instead of waiting, so a whole pick takes milliseconds.
 """
@@ -35,6 +44,12 @@ DEFAULT_POSES = {
     "lift":         {"shoulder_pan": 0.0, "shoulder_lift": -60.0, "elbow_flex": 70.0, "wrist_flex": 40.0, "wrist_roll": 0.0, "gripper": 2.0},
     "present":      {"shoulder_pan": 0.0, "shoulder_lift": -30.0, "elbow_flex": 0.0, "wrist_flex": 10.0, "wrist_roll": 0.0, "gripper": 2.0},
     "above_tray":   {"shoulder_pan": 0.0, "shoulder_lift": -100.0, "elbow_flex": 40.0, "wrist_flex": 95.0, "wrist_roll": 0.0, "gripper": 2.0},
+    # The cup reaches the phone at a different arm pose than the claw. The claw (gripper) stays
+    # at one value through a suction pick.
+    "suction_above":   {"shoulder_pan": 0.0, "shoulder_lift": -15.0, "elbow_flex": 40.0, "wrist_flex": 75.0, "wrist_roll": 0.0, "gripper": 30.0},
+    "suction_press":   {"shoulder_pan": 0.0, "shoulder_lift": 12.0, "elbow_flex": 18.0, "wrist_flex": 88.0, "wrist_roll": 0.0, "gripper": 30.0},
+    "suction_lift":    {"shoulder_pan": 0.0, "shoulder_lift": -55.0, "elbow_flex": 65.0, "wrist_flex": 45.0, "wrist_roll": 0.0, "gripper": 30.0},
+    "suction_present": {"shoulder_pan": 0.0, "shoulder_lift": -35.0, "elbow_flex": 5.0, "wrist_flex": 15.0, "wrist_roll": 0.0, "gripper": 30.0},
     "gripper_open": 60.0,
     "gripper_closed": 2.0,
 }
@@ -63,16 +78,19 @@ class SimArm:
     def __init__(self, poses: dict | None = None, miss_first: int = 0, slip_on_lift: bool = False,
                  stall_joint: str | None = None, take_after_s: float = 2.0, never_take: bool = False,
                  slip_at_present_after_s: float | None = None, joint_speed_deg_s: float = 180.0,
-                 grip_speed_s: float = 150.0, object_width: float = 15.0):
+                 grip_speed_s: float = 150.0, object_width: float = 15.0, seal_after_s: float = 1.0):
         if stall_joint is not None and stall_joint not in ARM_JOINTS:
             raise ValueError(f"stall_joint must be one of {ARM_JOINTS}, got {stall_joint!r}")
-        seconds = {"take_after_s": take_after_s}
+        seconds = {"take_after_s": take_after_s, "seal_after_s": seal_after_s}
         if slip_at_present_after_s is not None:
             seconds["slip_at_present_after_s"] = slip_at_present_after_s
         for name, value in seconds.items():
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not value >= 0:
                 raise ValueError(f"{name} must be a number of seconds >= 0, got {value!r}")
-        self.poses = poses_mod.validate(poses or DEFAULT_POSES)
+        poses = poses or DEFAULT_POSES
+        claw_taught = all(k in poses for k in ("above_object", "at_object", "lift", "gripper_open", "gripper_closed"))
+        # A file taught only for suction has no claw poses: the claw values then come from the defaults.
+        self.poses = poses_mod.validate(poses, None if claw_taught else "suction")
         self.pos = {j: float(self.poses["ready"][j]) for j in JOINTS}
         self.goal = dict(self.pos)
         self.clock = SimClock(self)
@@ -82,12 +100,16 @@ class SimArm:
         self.take_after_s = None if never_take else float(take_after_s)
         self.slip_at_present_after_s = slip_at_present_after_s
         self.presented_s = 0.0          # how long the object has been held at the present pose
+        self.seal_after_s = float(seal_after_s)     # suction: pressed this long, the cup sticks
+        self.pressed_s = 0.0            # suction: how long the arm has been at suction_press
+        self._seal_tried = False        # suction: this press has already stuck or failed
         self.joint_speed = joint_speed_deg_s
         self.grip_speed = grip_speed_s
-        self.object = "floor"           # floor | held | tray | hand (the person took it)
-        self.grasps = 0                 # closes that reached the object
+        self.object = "floor"           # floor | held | suction | tray | hand (the person took it)
+        self.grasps = 0                 # closes (claw) or seals (suction) that reached the object
         self._missing = False           # this close is a miss: the claw passes the object
-        g_open, g_closed = self.poses["gripper_open"], self.poses["gripper_closed"]
+        g_open = self.poses.get("gripper_open", DEFAULT_POSES["gripper_open"])
+        g_closed = self.poses.get("gripper_closed", DEFAULT_POSES["gripper_closed"])
         self._dir = 1.0 if g_open > g_closed else -1.0   # +1: opening increases the value
         self._object_stop = g_closed + self._dir * object_width
 
@@ -119,6 +141,24 @@ class SimArm:
         pose = self.poses[pose_name]
         return all(self.pos[j] == self.goal[j] and abs(self.goal[j] - pose[j]) < 1e-6 for j in ARM_JOINTS)
 
+    def _suction_seal(self, dt: float) -> None:
+        """The cup sticks once the arm has stayed at suction_press for seal_after_s, unless this
+        is one of the first miss_first presses. One try per press: it ends when the arm leaves."""
+        if "suction_press" not in self.poses:
+            return
+        if not self._near("suction_press"):
+            self.pressed_s = 0.0
+            self._seal_tried = False
+        elif self.object == "floor":
+            self.pressed_s += dt
+            if self.pressed_s >= self.seal_after_s and not self._seal_tried:
+                self._seal_tried = True
+                if self.misses_left > 0:
+                    self.misses_left -= 1
+                else:
+                    self.object = "suction"
+                    self.grasps += 1
+
     def _opening_amount(self, value: float) -> float:
         """How far value is on the open side of the object stop."""
         return (value - self._object_stop) * self._dir
@@ -129,15 +169,20 @@ class SimArm:
                 continue
             self.pos[j] = _approach(self.pos[j], self.goal[j], self.joint_speed * dt)
 
+        self._suction_seal(dt)
+
         if self.object == "held" and self.slip_on_lift and self._near("lift"):
             self.object = "floor"       # slipped out: the claw now closes on nothing
             self._missing = True
+        if self.object == "suction" and self.slip_on_lift and self._near("suction_lift"):
+            self.object = "floor"       # fell off the cup
 
-        if self.object == "held" and self._arrived("present"):
+        present = "suction_present" if self.object == "suction" else "present"
+        if self.object in ("held", "suction") and self._arrived(present):
             self.presented_s += dt
             if self.slip_at_present_after_s is not None and self.presented_s >= self.slip_at_present_after_s:
-                self.object = "floor"   # slipped out: the claw now closes on nothing
-                self._missing = True
+                self._missing = self.object == "held"   # the claw now closes on nothing
+                self.object = "floor"   # slipped out
             elif self.take_after_s is not None and self.presented_s >= self.take_after_s:
                 self.object = "hand"    # pulled out: nothing stops the claw now
         else:

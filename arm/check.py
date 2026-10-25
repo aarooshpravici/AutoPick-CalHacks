@@ -1,6 +1,6 @@
 """Pre-flight check to run before teaching or running the SO-101 arms (task A8).
 
-    python -m arm.check [--config PATH] [--poses PATH] [--to hand|tray]
+    python -m arm.check [--config PATH] [--poses PATH] [--to hand|tray|suction]
 
 Prints a checklist and exits 0 if nothing failed, 1 otherwise:
 
@@ -13,7 +13,8 @@ Checks: robot.yaml (the arm settings and, for hand mode, the handoff settings, t
 arm/pick.py's loaders); both arm ports exist and differ; LeRobot's calibration file for
 each arm exists; the follower's and the leader's calibrated spans agree (plan section 20:
 a short sweep makes the same angle a different pose on the two arms); poses.json is valid
-for the mode; the cameras robot.yaml lists (information only).
+for the mode (suction: `ready` and the suction_* poses; the claw poses may be absent); the
+cameras robot.yaml lists (information only).
 
 LeRobot's calibration files (0.6.2, robots/robot.py, teleoperators/teleoperator.py and
 utils/constants.py): <calibration root>/robots/so_follower/<follower_id>.json for the
