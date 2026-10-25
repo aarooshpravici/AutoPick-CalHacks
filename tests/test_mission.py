@@ -356,3 +356,142 @@ def test_extended_arm_refuses_base_motion_and_can_retry_after_manual_ready(make)
     arm.pos.update(DEFAULT_POSES['ready'])
     brain.request('phone', 'standing')
     assert wait_for(lambda: brain.status()['last_pick'])['result'] == 'taken'
+
+
+class Wandering:
+    """Searches forever with a nonzero drive."""
+    def search(self): return False, (40, 40)
+    def approach(self, detection): return False, (40, 40)
+
+
+class Empty:
+    def poll(self): return None
+    def close(self): pass
+
+
+def nonzero_drives(port):
+    return [c for c in port.commands if c.startswith('DRIVE ') and c.split()[1:] != ['0', '0']]
+
+
+def stopped_without_driving(brain, port, message):
+    wait_for(lambda: brain.status()['state'] == 'Stopped')
+    assert message in brain.status()['message']
+    wait_for(lambda: port.commands[-1] == 'STOP')
+    count = len(nonzero_drives(port))
+    time.sleep(.4)
+    assert len(nonzero_drives(port)) == count
+    assert port.left == port.right == 0
+
+
+def test_arm_leaving_ready_mid_search_stops_further_drive(make):
+    arm, port = SimArm(), FakeSerial()
+    brain = make(arm=arm, port=port, navigator_factory=Wandering, source=Empty())
+    brain.request('phone', 'standing')
+    wait_for(lambda: nonzero_drives(port))
+    arm.pos['shoulder_lift'] += 30
+    stopped_without_driving(brain, port, 'ready pose')
+    assert brain._io.is_alive() and not brain._io_error
+
+
+def test_dropped_retry_with_arm_off_ready_does_not_drive(make):
+    arm, port = SimArm(), FakeSerial()
+    calls = []
+    def pick(arm_, poses, **kwargs):
+        calls.append(1)
+        arm.pos['elbow_flex'] += 30
+        return dict(result='dropped')
+    class Parked(Wandering):
+        def approach(self, detection): return True, (0, 0)
+    brain = make(arm=arm, port=port, navigator_factory=Parked, pick=pick)
+    brain.request('phone', 'standing')
+    wait_for(lambda: calls)
+    stopped_without_driving(brain, port, 'ready pose')
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize('when', ['limit', 'drive'])
+def test_unreadable_arm_stops_without_killing_io(make, when):
+    class Flaky(SimArm):
+        fail = when == 'limit'
+        def read(self):
+            if self.fail:
+                raise OSError('bus timeout')
+            return super().read()
+    arm, port = Flaky(), FakeSerial()
+    brain = make(arm=arm, port=port, navigator_factory=Wandering, source=Empty())
+    brain.request('phone', 'standing')
+    if when == 'drive':
+        wait_for(lambda: nonzero_drives(port))
+        arm.fail = True
+    stopped_without_driving(brain, port, 'Arm unreadable')
+    assert 'bus timeout' in brain.status()['message']
+    assert brain._io.is_alive() and not brain._io_error
+    brain.stop()  # Not a control-connection failure: STOP and status still work.
+    assert brain.status()['state'] == 'Stopped' and 'STOP FAILED' not in brain.status()['message']
+
+
+def test_stale_ready_reading_is_refreshed_before_drive(make):
+    arm, port = SimArm(), FakeSerial()
+    reads = []
+    original = arm.read
+    arm.read = lambda: reads.append(time.monotonic()) or original()
+    brain = make(arm=arm, port=port, navigator_factory=Wandering, source=Empty())
+    brain.request('phone', 'standing')
+    wait_for(lambda: len(reads) > 3)
+    gaps = [b - a for a, b in zip(reads, reads[1:])]
+    assert len(reads) > 2 and max(gaps) < .35
+    assert len(reads) < len(nonzero_drives(port))  # not read on every 20 Hz drive
+
+
+def test_flickering_item_is_researched_at_most_three_times(make):
+    slot, built = {}, []
+    class Flicker(FakeDetections):
+        def poll(self):
+            message = super().poll()
+            if slot['brain'].status()['state'] == 'Approach':
+                message['items'] = []
+            return message
+    class Navigation(Wandering):
+        def __init__(self): built.append(1)
+        def approach(self, detection):
+            slot['brain']._last_seen = 0  # Item lost immediately.
+            return False, (10, 10)
+    brain = make(navigator_factory=Navigation, source=Flicker())
+    slot['brain'] = brain
+    brain.request('phone', 'standing')
+    before = len(built)
+    wait_for(lambda: brain.status()['state'] == 'Failed', timeout=10)
+    assert brain.status()['message'] == 'Item repeatedly lost; stopping'
+    assert len(built) - before == 3
+    brain.request('phone', 'standing')
+    assert brain._researches == 0
+
+
+@pytest.mark.parametrize('offset,expected', [(5.0, True), (5.1, False), (-5.0, True), (-5.1, False)])
+def test_arm_ready_boundary(make, offset, expected):
+    arm = SimArm()
+    brain = make(arm=arm)
+    arm.pos['wrist_flex'] = brain.poses['ready']['wrist_flex'] + offset
+    assert brain._arm_ready() is expected
+
+
+def test_arm_ready_rejects_nan_and_missing_and_ignores_frozen(make):
+    arm = SimArm()
+    brain = make(arm=arm)
+    arm.pos['wrist_roll'] = 90.0  # frozen in robot.yaml
+    arm.pos['gripper'] = 90.0  # not checked
+    assert brain._arm_ready()
+    arm.pos['elbow_flex'] = float('nan')
+    assert not brain._arm_ready()
+    del arm.pos['elbow_flex']
+    assert not brain._arm_ready()
+
+
+@pytest.mark.parametrize('value', [0, -1, float('nan'), float('inf'), True, '60', None])
+def test_bad_handoff_timeout_fails_before_any_hardware(config, value):
+    config['handoff']['timeout_s'] = value
+    config['base'].update(wiring_confirmed=True, drive_calibrated=True, serial_port='/dev/cu.R4')
+    with pytest.raises(ValueError, match='timeout_s'):
+        build(config, sim=False)
+    with pytest.raises(ValueError, match='timeout_s'):
+        build(config, sim=True)

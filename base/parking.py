@@ -3,6 +3,10 @@ from dataclasses import dataclass
 import math
 
 
+MAX_PICKUP_M = .33  # Provisional reach in config/robot.yaml.
+MAX_PROGRESS_TIMEOUT_S = 15
+
+
 @dataclass(frozen=True)
 class Command:
     left: float = 0
@@ -19,13 +23,15 @@ class Parking:
         self.limit = config['base']['max_speed_mm_s']
         self.cfg = config['navigation']
         self.pickup_max = self.cfg.get('pickup_max_distance_m', .33)
-        if not math.isfinite(self.pickup_max) or self.pickup_max <= 0:
-            raise ValueError('pickup range must be positive and finite')
+        if (isinstance(self.pickup_max, bool) or not isinstance(self.pickup_max, (int, float)) or
+                not math.isfinite(self.pickup_max) or not 0 < self.pickup_max <= MAX_PICKUP_M):
+            raise ValueError(f'pickup range must be positive, finite and at most {MAX_PICKUP_M} m')
         if math.hypot(*self.target) > self.pickup_max:
             raise ValueError('measured parking target exceeds pickup range; verify camera/arm reference')
         self.progress_timeout = self.cfg.get('approach_progress_timeout_s', 10)
-        if not isinstance(self.progress_timeout, (int, float)) or not math.isfinite(self.progress_timeout) or self.progress_timeout <= 0:
-            raise ValueError('approach progress timeout must be positive and finite')
+        if (isinstance(self.progress_timeout, bool) or not isinstance(self.progress_timeout, (int, float)) or
+                not math.isfinite(self.progress_timeout) or not 0 < self.progress_timeout <= MAX_PROGRESS_TIMEOUT_S):
+            raise ValueError(f'approach progress timeout must be positive, finite and at most {MAX_PROGRESS_TIMEOUT_S} s')
         self.best_error = math.inf
         self.progress_at = None
         self.started = None
