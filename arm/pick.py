@@ -403,9 +403,24 @@ class _Picker(_Mover):
         self.move("ready", self.g_open)
         result["detail"] = "released over the tray"
 
-    def run_hand(self, policy, result: dict, timeout_s: float, on_state, grip: str = "squeeze") -> None:
+    def run_hand(self, policy, result: dict, timeout_s: float, on_state, grip: str = "squeeze",
+                 before_present=None) -> None:
         on_state("pick")
         self.pick_up(policy, result)
+        if before_present is not None:
+            # A15: carry the object at ready (the only pose the base may drive with), let the
+            # base drive back to the start, then present. A failed drive leaves it held at ready.
+            self.carry("ready")
+            on_state("return")
+            try:
+                before_present()
+            except Exception as error:  # noqa: BLE001 - reported as the pick result
+                self._check_stop()
+                raise _Abort("return_failed", f"drive back to the start failed: {error}; holding at ready")
+            self._check_stop()
+            if not self.holding():
+                self._back_to_ready(None)
+                raise _Abort("dropped", "object lost while driving back to the start")
         near_person = min(self.speed, PRESENT_SPEED_DEG_S)
         on_state("present")
         self.carry("present", speed=near_person)
@@ -575,8 +590,10 @@ def _pick(mode, sequence, arm, poses, pan_deg, roll_deg, policy, speed_deg_s, st
 def pick_to_hand(arm, poses, pan_deg=0.0, roll_deg=0.0, policy=None, speed_deg_s=45,
                  handoff_timeout_s=60, stop_event: threading.Event | None = None, on_state=None,
                  log=None, handoff_grip="squeeze", camera_size=None, grasp="claw",
-                 suction_dwell_s=SUCTION_DWELL_S, suction_hold_s=SUCTION_HOLD_S) -> dict:
+                 suction_dwell_s=SUCTION_DWELL_S, suction_hold_s=SUCTION_HOLD_S, before_present=None) -> dict:
     """Pick the object at the parking spot, present it and wait for the person to take it.
+    before_present (claw only): called after the grasp with the object held at ready; it may
+    drive the base (A15 return to start). on_state then also gets "return".
     See the module docstring. Needs the `present` pose (not `above_tray`).
     grasp: "claw" (the default) or "suction" (passive cup, timed hold; needs the suction_* poses
     instead of the claw's, takes no policy, and ignores handoff_timeout_s and handoff_grip).
@@ -598,6 +615,8 @@ def pick_to_hand(arm, poses, pan_deg=0.0, roll_deg=0.0, policy=None, speed_deg_s
     if grasp == "suction":
         if policy is not None:
             raise ValueError("a policy drives the claw; it can't be combined with grasp='suction'")
+        if before_present is not None:
+            raise ValueError("return to start needs the claw; the passive cup has no hold check")
         for name, value in (("suction_dwell_s", suction_dwell_s), ("suction_hold_s", suction_hold_s)):
             if not (_is_number(value) and value > 0):
                 raise ValueError(f"{name} must be a positive number of seconds, got {value!r}")
@@ -606,7 +625,7 @@ def pick_to_hand(arm, poses, pan_deg=0.0, roll_deg=0.0, policy=None, speed_deg_s
                      picker_cls=functools.partial(_SuctionPicker, dwell_s=float(suction_dwell_s),
                                                   hold_s=float(suction_hold_s)))
     sequence = functools.partial(_Picker.run_hand, timeout_s=handoff_timeout_s, on_state=on_state,
-                                 grip=handoff_grip)
+                                 grip=handoff_grip, before_present=before_present)
     return _pick("hand", sequence, arm, poses, pan_deg, roll_deg, policy, speed_deg_s, stop_event, log,
                  camera_size)
 

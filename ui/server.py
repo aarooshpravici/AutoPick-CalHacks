@@ -533,7 +533,7 @@ const label = s => s.replaceAll("_", " ");
 
 // The hand-off, in order (plan 10.7), and what the big heading says for each state.
 const STEPS = ["Search", "Approach", "Pick", "Present", "WaitForTake"];
-const TITLES = {Search: "Searching", Approach: "Driving over", ArmCamera: "Parked", Pick: "Picking it up", Present: "Holding it up"};
+const TITLES = {Search: "Searching", Approach: "Driving over", ArmCamera: "Parked", Pick: "Picking it up", Return: "Driving back", Present: "Holding it up"};
 const title = s => s.state === "WaitForTake" ? (s.item ? `Take your ${label(s.item)}` : "Take it")
                                               : TITLES[s.state] || s.state;
 
@@ -700,7 +700,7 @@ async function refresh() {
     $("message").textContent = s.message || "";
     $("statecard").dataset.state = s.state;
     $("armcam").hidden = s.state !== "ArmCamera";
-    const at = STEPS.indexOf(s.state === "ArmCamera" ? "Pick" : s.state);
+    const at = STEPS.indexOf(s.state === "ArmCamera" || s.state === "Return" ? "Pick" : s.state);
     STEPS.forEach((n, i) => $("step-" + n).setAttribute("data-step", i < at ? "done" : i === at ? "now" : "todo"));
     $("item").textContent = s.item ? label(s.item) : "–";
     $("detection").textContent = s.detection ? `${s.detection.label} ${Math.round(s.detection.conf * 100)}%` : "–";
