@@ -165,7 +165,9 @@ def create_app(brain: Brain, parse=request_mod.parse_request, clarify=request_mo
 
     @app.get("/", response_class=HTMLResponse)
     def page():
-        return PAGE
+        simulated = isinstance(brain, FakeBrain) or getattr(brain, "simulated", False)
+        return PAGE.replace("__MODE__", "Simulation" if simulated else "Robot control").replace(
+            "__MODE_NOTE__", "Simulation · no hardware moves" if simulated else "Robot control · stay within reach of the E-stop")
 
     # async: runs on the event loop, never queued behind the worker threads.
     @app.post("/stop")
@@ -296,106 +298,150 @@ PAGE = """<!doctype html>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Floor Picker</title>
 <style>
-  :root { --bg:#f6f5f2; --card:#fff; --ink:#1d1d1b; --muted:#6b6a66; --line:#e2e0da;
-          --stop:#c62828; --stop-dark:#8e1c1c; --go:#1f6f4a; }
-  @media (prefers-color-scheme: dark) {
-    :root { --bg:#151514; --card:#1f1f1d; --ink:#f1f0ec; --muted:#a3a29c; --line:#34332f; }
-  }
-  * { box-sizing:border-box; }
-  html { -webkit-text-size-adjust:100%; text-size-adjust:100%; }   /* no iOS text inflation in landscape */
-  button, select { touch-action:manipulation; }                   /* fast taps; a double tap on STOP doesn't zoom */
-  body { margin:0; background:var(--bg); color:var(--ink);
-         font:16px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; padding:16px; }
-  main { max-width:640px; margin:0 auto; display:grid; gap:14px; }
-  h1 { font-size:18px; margin:0; color:var(--muted); font-weight:600; letter-spacing:.02em; }
-  #stop { width:100%; min-height:120px; border:0; border-radius:16px; background:var(--stop);
-          color:#fff; font-size:44px; font-weight:800; letter-spacing:.08em; cursor:pointer;
-          box-shadow:0 6px 0 var(--stop-dark); }
-  #stop:active { transform:translateY(4px); box-shadow:0 2px 0 var(--stop-dark); }
-  #stopfail { background:var(--stop); color:#fff; border-radius:14px; padding:14px; font-size:20px; }
-  #stopfail b { display:block; font-size:26px; }
-  #stopfail[hidden] { display:none; }
-  .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:14px; }
-  #state { font-size:28px; font-weight:700; }
-  #message { color:var(--muted); margin-top:2px; }
-  #steps { display:flex; gap:6px; list-style:none; margin:12px 0 0; padding:0; font-size:13px; }
-  #steps li { flex:1; text-align:center; padding:4px 2px; border-radius:8px; color:var(--muted);
-              border:1px solid var(--line); }
-  #steps li[data-step="done"] { color:var(--ink); }
-  #steps li[data-step="now"] { background:var(--go); border-color:var(--go); color:#fff; font-weight:700; }
-  #statecard[data-state="WaitForTake"] { background:var(--go); border-color:var(--go); color:#fff;
-          text-align:center; padding:24px 14px; animation:take 1.4s ease-in-out infinite; }
-  #statecard[data-state="WaitForTake"] #state { font-size:40px; }
-  #statecard[data-state="WaitForTake"] #message { color:#fff; font-size:20px; }
-  #statecard[data-state="WaitForTake"] #steps li { color:#fff; border-color:rgba(255,255,255,.5); }
-  #statecard[data-state="WaitForTake"] #steps li[data-step="now"] { background:#fff; color:var(--go); }
-  .stale #statecard[data-state="WaitForTake"] #state::after { color:#fff; }
-  @keyframes take { 50% { box-shadow:0 0 0 8px rgba(31,111,74,.35); } }
-  @media (prefers-reduced-motion: reduce) { #statecard[data-state="WaitForTake"] { animation:none; } }
-  form { display:flex; gap:8px; flex-wrap:wrap; }
-  #text { flex:1 1 220px; font:inherit; font-size:18px; padding:12px; border-radius:10px;
-          border:1px solid var(--line); background:var(--bg); color:var(--ink); }
-  select, button.go { font:inherit; font-size:17px; padding:12px 14px; border-radius:10px;
-          border:1px solid var(--line); background:var(--bg); color:var(--ink); }
-  button.go { background:var(--go); color:#fff; border-color:var(--go); font-weight:600; }
-  button.go[aria-disabled="true"] { opacity:.45; cursor:wait; }
-  dl { display:grid; grid-template-columns:auto 1fr; gap:6px 14px; margin:0; }
-  dt { color:var(--muted); } dd { margin:0; font-variant-numeric:tabular-nums; }
-  .row { display:contents; } .row[hidden] { display:none; }
-  #thumbs { display:flex; gap:8px; flex-wrap:wrap; } #thumbs img { width:150px; max-width:100%; border-radius:8px; }
-  @media (max-width:480px) { #thumbs img { width:calc(50% - 4px); } }   /* phones: two per row, full width */
-  #reply { color:var(--muted); min-height:1.4em; }
-  .stale #state::after { content:" (no connection)"; font-size:16px; color:var(--stop); }
-  /* clarifying questions */
-  #question { margin-top:12px; font-size:20px; font-weight:600; }
-  #question[hidden] { display:none; }
-  #question small { display:block; color:var(--muted); font-size:13px; font-weight:400; }
-  #opts { display:flex; gap:8px; flex-wrap:wrap; margin-top:8px; }
-  button.opt { min-height:48px; min-width:48px; padding:10px 18px; font:inherit; font-size:18px; font-weight:600;
-               border-radius:10px; border:2px solid var(--go); background:var(--card); color:var(--ink); cursor:pointer; }
-  button.opt[aria-disabled="true"] { opacity:.45; cursor:wait; }
-  #cancel { min-height:44px; padding:8px 14px; font:inherit; font-size:15px; border-radius:10px;
-            border:1px solid var(--line); background:var(--bg); color:var(--muted); cursor:pointer; }
-  #cancel[hidden] { display:none; }
-  #setting { display:flex; align-items:center; gap:8px; margin-top:10px; color:var(--muted); min-height:44px; }
-  #setting input { width:22px; height:22px; }
+:root { color-scheme:light; --bg:#f5f4ef; --card:#fffefa; --ink:#243a32; --muted:#69756d; --line:#dddeda;
+        --go:#245641; --stop:#b83832; --stop-dark:#912923; }
+* { box-sizing:border-box; }
+html { -webkit-text-size-adjust:100%; text-size-adjust:100%; }
+body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+button,input,select { font:inherit; } button,select { touch-action:manipulation; } button { cursor:pointer; }
+button:focus-visible,input:focus-visible,select:focus-visible { outline:3px solid #a96a30; outline-offset:4px; }
+[hidden] { display:none!important; }
+main { max-width:1240px; margin:auto; padding:0 48px 30px; }
+.topbar { display:flex; align-items:center; justify-content:space-between; gap:20px; padding:28px 0; border-bottom:1px solid var(--line); }
+.brand { display:flex; align-items:center; gap:11px; }
+.mark { display:grid; place-items:center; width:36px; height:36px; border-radius:12px; background:var(--go); color:#f4f6dc; font-size:24px; }
+h1 { font-size:21px; margin:0; font-weight:650; letter-spacing:-.7px; }
+.brand-note { border-left:1px solid #cdd2ca; margin-left:8px; padding-left:18px; font-size:12px; color:var(--muted); }
+.top-status { display:flex; gap:16px; align-items:center; font-size:12px; }
+.mode { padding:6px 12px; border-radius:30px; border:1px solid #d3d8cb; background:#ecefe5; white-space:nowrap; }
+#connection { display:flex; align-items:center; gap:7px; color:var(--muted); }
+#connection::before { content:""; width:6px; height:6px; background:#75856a; border-radius:50%; }
+.intro { padding:46px 0 32px; display:flex; justify-content:space-between; align-items:end; gap:24px; }
+.eyebrow { text-transform:uppercase; letter-spacing:2px; font-size:10px; font-weight:700; color:var(--muted); }
+h2 { font-family:Georgia,"Times New Roman",serif; font-weight:400; font-size:52px; line-height:1.12; letter-spacing:-2px; margin:12px 0 14px; }
+h2 em { color:#64805c; font-weight:400; }
+.intro p { color:var(--muted); font-size:14px; margin:0; }
+.intro-note { text-align:right; max-width:185px; font-size:12px!important; line-height:1.7; }
+.workspace { display:grid; grid-template-columns:minmax(0,1.45fr) minmax(300px,1fr); gap:22px; align-items:start; }
+.card { background:var(--card); border:1px solid var(--line); border-radius:20px; padding:28px; }
+.card-label { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:24px; }
+.card-label h3 { margin:0; font-size:13px; font-weight:600; }
+.card-number { color:#8b9487; font-size:11px; font-variant-numeric:tabular-nums; }
+.request-title { font-family:Georgia,"Times New Roman",serif; font-size:29px; font-weight:400; letter-spacing:-.7px; margin:0 0 8px; }
+.help { font-size:13px; color:var(--muted); margin:0 0 24px; }
+form { display:grid; grid-template-columns:1fr auto; gap:12px; }
+.input-label { grid-column:1/-1; color:var(--muted); font-size:12px; margin-bottom:-5px; }
+#text { grid-column:1/-1; min-width:0; width:100%; border:1px solid #ccd3c7; border-radius:12px; background:#f8f9f3; color:var(--ink); padding:18px; font-size:18px; }
+#text::placeholder { color:#7c897a; }
+.select-wrap { display:flex; gap:12px; align-items:center; color:var(--muted); font-size:12px; }
+select { appearance:none; -webkit-appearance:none; height:48px; background-image:linear-gradient(45deg,transparent 50%,#69756d 50%),linear-gradient(135deg,#69756d 50%,transparent 50%); background-position:calc(100% - 15px) 21px,calc(100% - 11px) 21px; background-size:4px 4px; background-repeat:no-repeat; min-height:48px; padding:10px 28px 10px 12px; border:1px solid var(--line); border-radius:10px; background-color:var(--card); color:var(--ink); max-width:100%; }
+button.go { min-height:48px; padding:12px 22px; background:var(--go); border:1px solid var(--go); border-radius:10px; color:#fff; font-size:14px; font-weight:600; }
+button.go:hover { background:#183f2e; }
+button[aria-disabled="true"] { opacity:.5; cursor:wait; }
+#setting { display:flex; align-items:center; gap:10px; margin-top:18px; font-size:12px; color:var(--muted); min-height:44px; }
+#setting input { width:18px; height:18px; accent-color:var(--go); }
+#question { border-top:1px solid var(--line); padding-top:20px; margin-top:14px; font-size:20px; }
+#question small { display:block; margin-top:6px; font-size:12px; color:var(--muted); }
+#opts { display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; }
+button.opt { padding:10px 18px; min-height:48px; border:1px solid #a3b49b; background:#edf2e6; color:var(--ink); border-radius:10px; }
+#cancel { padding:10px 14px; min-height:44px; margin-top:10px; border:1px solid var(--line); border-radius:10px; background:var(--card); color:var(--muted); }
+#reply { font-size:13px; color:var(--muted); min-height:20px; margin-top:10px; overflow-wrap:anywhere; }
+.request-foot { border-top:1px solid var(--line); padding-top:18px; margin-top:16px; display:flex; gap:10px; align-items:center; color:var(--muted); font-size:11px; }
+.request-foot svg { flex:none; }
+.side { display:grid; gap:18px; }
+#statecard { background:#e9eedf; border-color:#dce3d1; padding:26px; transition:background .2s; }
+#state { font-family:Georgia,"Times New Roman",serif; font-size:36px; line-height:1.2; margin:6px 0 10px; letter-spacing:-1px; }
+#message { color:#53654d; font-size:13px; min-height:20px; }
+#steps { display:flex; list-style:none; gap:5px; padding:0; margin:30px 0 0; counter-reset:step; }
+#steps li { flex:1; min-width:0; font-size:10px; color:#5f7056; text-align:center; position:relative; padding-top:34px; }
+#steps li::before { counter-increment:step; content:counter(step); display:grid; place-items:center; width:24px; height:24px; border-radius:50%; background:#e9eedf; border:1px solid #aebba1; position:absolute; top:0; left:calc(50% - 12px); font-size:10px; z-index:1; }
+#steps li:not(:last-child)::after { content:""; height:1px; background:#bdc9b0; position:absolute; top:12px; left:calc(50% + 12px); width:calc(100% - 19px); }
+#steps li[data-step="now"] { color:var(--go); font-weight:700; }
+#steps li[data-step="now"]::before { background:var(--go); border-color:var(--go); color:#fff; box-shadow:0 0 0 4px #d7e0cb; }
+#steps li[data-step="done"]::before { content:"✓"; background:#c8d7bc; border-color:#a9bd9a; }
+#statecard[data-state="WaitForTake"] { background:var(--go); color:#fff; }
+#statecard[data-state="WaitForTake"] #message,#statecard[data-state="WaitForTake"] li,#statecard[data-state="WaitForTake"] .eyebrow,#statecard[data-state="WaitForTake"] h3 { color:#fff; }
+#statecard[data-state="WaitForTake"] li::before { color:var(--ink); }
+#statecard[data-state="WaitForTake"] li[data-step="now"]::before { background:#fff; }
+.stop-panel { background:#fcf3ef; border:1px solid #e8d5cf; border-radius:18px; padding:19px; }
+#stop { display:flex; align-items:center; justify-content:center; gap:12px; width:100%; min-height:76px; background:var(--stop); border:0; border-radius:11px; color:#fff; font-size:24px; font-weight:650; letter-spacing:2px; box-shadow:0 3px 0 var(--stop-dark); }
+#stop:hover { background:#a52f29; } #stop:active { transform:translateY(2px); box-shadow:0 1px 0 var(--stop-dark); }
+.stop-symbol { width:15px; height:15px; border:2px solid currentColor; border-radius:3px; }
+.stop-caption { display:flex; align-items:center; justify-content:space-between; gap:8px; margin:13px 0 0; color:#805a52; font-size:11px; }
+kbd { font:10px inherit; border:1px solid #d8beb6; padding:1px 5px; border-radius:4px; }
+#stopfail { background:#a52f29; color:white; padding:18px; border-radius:12px; margin-bottom:20px; }
+#stopfail b { display:block; font-size:20px; }
+.telemetry { margin-top:22px; display:grid; grid-template-columns:1fr 1fr; padding:0; overflow:hidden; }
+.detail-panel { padding:25px 28px; }
+.detail-panel + .detail-panel { border-left:1px solid var(--line); }
+.telemetry .card-label { margin-bottom:18px; }
+dl { display:grid; grid-template-columns:90px 1fr; gap:10px; margin:0; font-size:13px; }
+dt { color:var(--muted); } dd { margin:0; font-variant-numeric:tabular-nums; overflow-wrap:anywhere; }
+.row { display:contents; }
+#thumbs { display:flex; flex-wrap:wrap; gap:8px; } #thumbs img { width:calc(50% - 4px); border-radius:8px; }
+#cameraempty { display:flex; align-items:center; gap:14px; padding:12px 0; color:var(--muted); font-size:12px; }
+.camera-icon { display:grid; place-items:center; width:46px; height:46px; border:1px dashed #bfc9b7; border-radius:13px; flex:none; }
+#cameraempty strong { display:block; font-weight:500; font-size:13px; color:var(--ink); margin-bottom:4px; }
+footer { display:flex; justify-content:space-between; gap:16px; padding-top:24px; color:#7a8377; font-size:10px; letter-spacing:.3px; }
+#connection[data-online="false"] { color:var(--stop); } #connection[data-online="false"]::before { background:var(--stop); }
+.stale #state::after { content:" · Offline"; font:14px -apple-system,sans-serif; color:var(--stop); }
+@media (min-width:761px) { .side { position:sticky; top:20px; } }
+@media (max-width:900px) { main { padding:0 28px 24px; } .brand-note { display:none; } h2 { font-size:46px; } .workspace { grid-template-columns:minmax(0,1.2fr) minmax(280px,1fr); } .card { padding:22px; } .select-wrap { gap:6px; } button.go { padding:12px 15px; } }
+@media (max-width:760px) {
+ main { padding:0 20px 150px; } .topbar { padding:22px 0; } .top-status { gap:8px; } #connection { font-size:0; gap:0; }
+ h1 { font-size:19px; } .intro { padding:32px 0 26px; } h2 { font-size:43px; } .intro-note { display:none; }
+ .workspace { display:flex; flex-direction:column; gap:16px; } .request-card,.side { width:100%; } .side { display:contents; }
+ #statecard { width:100%; } .stop-panel { position:fixed; bottom:0; left:0; right:0; padding:12px 20px max(12px,env(safe-area-inset-bottom)); border-radius:18px 18px 0 0; z-index:10; box-shadow:0 -6px 24px #243a3210; }
+ #stop { min-height:60px; font-size:23px; } .stop-caption { margin-top:10px; } .telemetry { grid-template-columns:1fr; margin-top:16px; }
+ .detail-panel + .detail-panel { border-left:0; border-top:1px solid var(--line); } footer { font-size:10px; } .request-title { font-size:27px; }
+ #stopfail { position:sticky; top:8px; z-index:11; } .select-wrap { flex-wrap:wrap; } .select-wrap label { display:none; }
+}
+@media (max-width:380px) { form { grid-template-columns:1fr; } .select-wrap label { display:inline; } #go { width:100%; } .mode { padding:5px 9px; } }
+@media (prefers-reduced-motion:reduce) { *,*::before,*::after { transition:none!important; scroll-behavior:auto!important; } }
 </style></head>
 <body><main>
-  <h1>FLOOR PICKER</h1>
-  <button id="stop" type="button">STOP</button>
-  <div id="stopfail" role="alert" hidden>
-    <b>STOP FAILED: hit the E-stop on the robot.</b>
-    <span id="stopwhy"></span> Trying again every second.
+  <header class="topbar">
+    <div class="brand"><span class="mark" aria-hidden="true"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M5 4v8a7 7 0 0 0 14 0V4M5 8h4m6 0h4M9 4v4m6-4v4M12 19v3"/><circle cx="12" cy="13" r="2"/></svg></span><h1>floor picker<span style="color:#8eaa72">.</span></h1><span class="brand-note">A little help, within reach.</span></div>
+    <div class="top-status"><span class="mode">__MODE__</span><span id="connection" role="status">Connecting</span></div>
+  </header>
+  <section class="intro">
+    <div><div class="eyebrow">Your everyday helping hand</div><h2>Leave the reaching<br><em>to us.</em></h2><p>Tell us what you dropped. We'll take it from here.</p></div>
+    <p class="intro-note">From the floor to your hand.<br>A little more independence.</p>
+  </section>
+  <div id="stopfail" role="alert" hidden><b>STOP FAILED: hit the E-stop on the robot.</b><span id="stopwhy"></span> Trying again every second.</div>
+  <div class="workspace">
+    <section class="card request-card">
+      <div class="card-label"><h3>Make a request</h3><span class="card-number">01 / REQUEST</span></div>
+      <h3 class="request-title">What can we pick up?</h3><p class="help">Use your own words. We’ll help with the details.</p>
+      <form id="ask">
+        <label class="input-label" for="text">Your request</label>
+        <input id="text" autocomplete="off" placeholder="I dropped my phone">
+        <div class="select-wrap"><label for="hand">Hand-off height</label><select id="hand" aria-label="Hand height"><option value="">Ask me</option><option value="seated">Seated</option><option value="standing">Standing</option></select></div>
+        <button class="go" id="go" type="submit" aria-disabled="false">Send request <span aria-hidden="true">↗</span></button>
+      </form>
+      <label id="setting"><input type="checkbox" id="clarify" checked> Ask me questions first</label>
+      <div id="question" role="status" aria-live="polite" hidden></div><div id="opts"></div>
+      <button id="cancel" type="button" hidden>Cancel</button><div id="reply" role="status" aria-live="polite"></div>
+      <div class="request-foot"><svg width="16" height="18" viewBox="0 0 16 18" fill="none" aria-hidden="true"><path d="M8 1 14 3v5c0 4-6 8-6 8S2 12 2 8V3l6-2Z" stroke="currentColor"/><path d="m5 8 2 2 4-4" stroke="currentColor"/></svg> You're in control. Stop a request at any time.</div>
+    </section>
+    <aside class="side" aria-label="Mission and stop controls">
+      <section class="card" id="statecard">
+        <div class="card-label"><h3>Mission status</h3><span class="card-number">02 / PROGRESS</span></div>
+        <div id="state" aria-live="polite">Connecting…</div><div id="message"></div>
+        <ol id="steps" aria-label="Hand-off steps"><li id="step-Search">Search</li><li id="step-Approach">Drive</li><li id="step-Pick">Pick</li><li id="step-Present">Present</li><li id="step-WaitForTake">Take</li></ol>
+      </section>
+      <section class="stop-panel" aria-label="Stop control"><button id="stop" type="button" aria-label="STOP"><span class="stop-symbol" aria-hidden="true"></span>STOP</button><div class="stop-caption"><span>Stop motion · hold the arm</span><span>or press <kbd>Esc</kbd></span></div></section>
+    </aside>
   </div>
-  <section class="card" id="statecard">
-    <div id="state">…</div><div id="message"></div>
-    <ol id="steps" aria-label="Hand-off steps">
-      <li id="step-Search">Search</li><li id="step-Approach">Drive</li><li id="step-Pick">Pick</li>
-      <li id="step-Present">Present</li><li id="step-WaitForTake">Take</li>
-    </ol>
+  <section class="card telemetry" aria-label="Robot details">
+    <div class="detail-panel"><div class="card-label"><h3>At a glance</h3><span class="card-number">03 / DETAILS</span></div>
+      <dl><dt>Item</dt><dd id="item">–</dd><dt>Seen</dt><dd id="detection">–</dd><div class="row" id="liftrow" hidden><dt>Tray height</dt><dd id="lift"></dd></div><div class="row" id="trayrow" hidden><dt>Tray weight</dt><dd id="tray"></dd></div><dt>Last pick</dt><dd id="pick">–</dd></dl>
+    </div>
+    <div class="detail-panel"><div class="card-label"><h3>Camera view</h3><span class="card-number">04 / VISION</span></div>
+      <div id="cameraempty"><span class="camera-icon"><svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true"><rect x="3" y="6" width="18" height="14" rx="3"/><path d="m8 6 1-3h6l1 3"/><circle cx="12" cy="13" r="3.5"/></svg></span><span><strong>No camera feed available</strong>A live view appears when the robot provides one.</span></div><div id="thumbs"></div>
+    </div>
   </section>
-  <section class="card">
-    <form id="ask">
-      <input id="text" autocomplete="off" placeholder="I dropped my phone">
-      <select id="hand" aria-label="Hand height"><option value="">Ask me</option><option value="seated">Seated</option><option value="standing">Standing</option></select>
-      <button class="go" id="go" type="submit" aria-disabled="false">Ask</button>
-    </form>
-    <label id="setting"><input type="checkbox" id="clarify" checked> Ask me questions first</label>
-    <div id="question" role="status" aria-live="polite" hidden></div>
-    <div id="opts"></div>
-    <button id="cancel" type="button" hidden>Cancel</button>
-    <div id="reply"></div>
-  </section>
-  <section class="card">
-    <dl>
-      <dt>Item</dt><dd id="item">–</dd>
-      <dt>Seen</dt><dd id="detection">–</dd>
-      <div class="row" id="liftrow" hidden><dt>Tray height</dt><dd id="lift"></dd></div>
-      <div class="row" id="trayrow" hidden><dt>Tray weight</dt><dd id="tray"></dd></div>
-      <dt>Last pick</dt><dd id="pick">–</dd>
-    </dl>
-    <div id="thumbs"></div>
-  </section>
+  <footer><span>FLOOR PICKER / Made for a little more ease.</span><span>__MODE_NOTE__</span></footer>
 </main>
 <script>
 const $ = id => document.getElementById(id);
@@ -541,7 +587,9 @@ async function refresh() {
     if (!r.ok || !r.body) throw new Error(`status ${r.status}`);
     const s = r.body;
     $("statecard").parentElement.classList.remove("stale");
-    $("state").textContent = title(s); $("message").textContent = s.message || "";
+    if ($("connection").textContent !== "Connected") $("connection").textContent = "Connected"; $("connection").setAttribute("data-online", "true");
+    if ($("state").textContent !== title(s)) $("state").textContent = title(s);
+    $("message").textContent = s.message || "";
     $("statecard").dataset.state = s.state;
     const at = STEPS.indexOf(s.state);
     STEPS.forEach((n, i) => $("step-" + n).setAttribute("data-step", i < at ? "done" : i === at ? "now" : "todo"));
@@ -552,6 +600,7 @@ async function refresh() {
     if (s.lift_mm != null) $("lift").textContent = `${Math.round(s.lift_mm)} mm`;
     if (s.tray_g != null) $("tray").textContent = `${Math.round(s.tray_g)} g`;
     $("pick").textContent = s.last_pick ? `${s.last_pick.result} (${s.last_pick.grasp}, ${s.last_pick.seconds} s)` : "–";
+    $("cameraempty").hidden = (s.cameras || []).length > 0;
     const names = (s.cameras || []).join(",");
     if (names !== shown) {
       shown = names;
@@ -567,7 +616,7 @@ async function refresh() {
       img.dataset.busy = "1";
       img.src = `/thumb/${encodeURIComponent(img.dataset.name)}?t=${Date.now()}`;
     }
-  } catch (e) { $("statecard").parentElement.classList.add("stale"); }
+  } catch (e) { $("statecard").parentElement.classList.add("stale"); if ($("connection").textContent !== "Disconnected") $("connection").textContent = "Disconnected"; $("connection").setAttribute("data-online", "false"); }
   finally { refreshing = false; }
 }
 setInterval(refresh, 500); refresh();
