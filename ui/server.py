@@ -402,11 +402,35 @@ button.phone-choice:hover { background:#dce7d1; border-color:var(--go); }
 }
 @media (max-width:380px) { form { grid-template-columns:1fr; } .select-wrap label { display:inline; } #go { width:100%; } .mode { padding:5px 9px; } }
 @media (prefers-reduced-motion:reduce) { *,*::before,*::after { transition:none!important; scroll-behavior:auto!important; } }
+
+.tutorial-button { border:1px solid #cbd3c3; background:var(--card); color:var(--go); border-radius:30px; padding:7px 13px; min-height:40px; font-size:12px; white-space:nowrap; }
+.tutorial-button:hover { background:#e9eedf; }
+#tour { position:fixed; inset:0; z-index:1000; }
+#tour-shade { position:absolute; inset:0; background:#15281fc9; transition:background .35s; }
+#tour[data-guided="true"] #tour-shade { background:transparent; }
+#tour-ring { position:fixed; pointer-events:none; border:2px solid #c8e69c; border-radius:16px; box-shadow:0 0 0 9999px #15281fc9,0 0 0 5px #c8e69c33; transition:top .4s ease,left .4s ease,width .4s ease,height .4s ease,opacity .3s; opacity:0; }
+#tour[data-guided="true"] #tour-ring { opacity:1; }
+#tour-card { position:fixed; width:min(410px,calc(100vw - 32px)); padding:25px; background:var(--card); color:var(--ink); border:1px solid #d9dfcf; border-radius:20px; box-shadow:0 20px 70px #10201540; transition:top .4s ease,left .4s ease; max-height:calc(100dvh - 32px); overflow:auto; }
+.tour-heading { display:flex; justify-content:space-between; align-items:center; margin-bottom:18px; }
+#tour-count { font-size:10px; letter-spacing:1.5px; color:var(--muted); text-transform:uppercase; }
+#tour-close { width:44px; height:44px; border:0; background:#eef1e8; border-radius:50%; color:var(--ink); font-size:23px; margin:-10px -10px -10px 0; }
+#tour-title { font:400 28px/1.15 Georgia,serif; letter-spacing:-.6px; margin:0 0 12px; }
+#tour-description { color:var(--muted); font-size:14px; line-height:1.6; margin:0; }
+.tour-copy-enter { animation:tour-copy .35s ease both; }
+@keyframes tour-copy { from { opacity:0; transform:translateY(-10px); } to { opacity:1; transform:translateY(0); } }
+.tour-actions { display:flex; gap:10px; margin-top:24px; align-items:center; }
+#tour-next { margin-left:auto; background:var(--go); color:#fff; border:1px solid var(--go); }
+#tour-back { background:transparent; color:var(--muted); border:1px solid var(--line); }
+#tour-next,#tour-back { min-height:44px; border-radius:9px; padding:10px 16px; font-size:13px; }
+#tour-stop { margin-top:17px; width:100%; min-height:44px; border:1px solid #d7aaa2; border-radius:9px; background:#fcf0ed; color:#a02c28; font-size:12px; font-weight:650; }
+@media (prefers-reduced-motion:reduce) { .tour-copy-enter { animation:none; } }
+@media (max-width:760px) { .topbar { flex-wrap:wrap; gap:14px; } .top-status { margin-left:auto; } }
+@media (max-width:380px) { .top-status { width:100%; justify-content:flex-end; } }
 </style></head>
 <body><main>
   <header class="topbar">
     <div class="brand"><span class="mark" aria-hidden="true"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M5 4v8a7 7 0 0 0 14 0V4M5 8h4m6 0h4M9 4v4m6-4v4M12 19v3"/><circle cx="12" cy="13" r="2"/></svg></span><h1>floor picker<span style="color:#8eaa72">.</span></h1><span class="brand-note">A little help, within reach.</span></div>
-    <div class="top-status"><span class="mode">__MODE__</span><span id="connection" role="status">Connecting</span></div>
+    <div class="top-status"><button id="tutorial" type="button" class="tutorial-button">Tutorial <span aria-hidden="true">↗</span></button><span class="mode">__MODE__</span><span id="connection" role="status">Connecting</span></div>
   </header>
   <section class="intro">
     <div><div class="eyebrow">Your everyday helping hand</div><h2>Leave the reaching<br><em>to us.</em></h2><p>Choose what you dropped. We'll take it from here.</p></div>
@@ -446,6 +470,16 @@ button.phone-choice:hover { background:#dce7d1; border-color:var(--go); }
   </section>
   <footer><span>FLOOR PICKER / Made for a little more ease.</span><span>__MODE_NOTE__</span></footer>
 </main>
+<div id="tour" hidden>
+  <div id="tour-shade"></div><div id="tour-ring" aria-hidden="true"></div>
+  <section id="tour-card" role="dialog" aria-modal="true" aria-labelledby="tour-title" aria-describedby="tour-description" tabindex="-1">
+    <div class="tour-heading"><span id="tour-count"></span><button id="tour-close" type="button" aria-label="Close tutorial">×</button></div>
+    <div id="tour-copy" aria-live="polite"><h2 id="tour-title"></h2><p id="tour-description"></p></div>
+    <div class="tour-actions"><button id="tour-back" type="button">Back</button><button id="tour-next" type="button">Let’s begin ↗</button></div>
+    <button id="tour-stop" type="button">STOP motion · available any time</button>
+  </section>
+</div>
+
 <script>
 const $ = id => document.getElementById(id);
 const STOP_WORDS = new RegExp(__STOP_PATTERN__, "i");   // the same check as ui/request.py
@@ -624,6 +658,86 @@ async function refresh() {
   } catch (e) { $("statecard").parentElement.classList.add("stale"); if ($("connection").textContent !== "Disconnected") $("connection").textContent = "Disconnected"; $("connection").setAttribute("data-online", "false"); }
   finally { refreshing = false; }
 }
+
+// The tutorial never activates a target control or sends a fetch request.
+const TOUR_STEPS = [
+  {target:null, title:"Welcome, let’s help you use Floor Picker", text:"A quick tour of choosing your item, setting your hand-off height and staying in control."},
+  {target:"go", title:"This is your object option", text:"Phone is the item Floor Picker can find and bring to you. This is where you choose what you dropped."},
+  {target:"hand", title:"Choose your hand-off height", text:"Choose Seated or Standing to tell Floor Picker how you’d like the item handed to you. Set this before starting your request."},
+  {target:"go", title:"Tap Phone to get started", text:"Once your height is set, click or tap Phone to start the request. Just looking at this tutorial won’t start anything."},
+  {target:"stop", title:"You can stop at any time", text:"Watch Mission status to follow along. Hit STOP whenever you need to stop motion and hold the arm. You can also press Esc."}
+];
+let tourIndex = -1, tourFrame = null, tourUntil = 0, tourReturnFocus = null;
+function placeTour() {
+  if (tourIndex < 0) return;
+  const step = TOUR_STEPS[tourIndex], card = $("tour-card"), ring = $("tour-ring");
+  const vw = window.innerWidth, vh = window.innerHeight, margin = 16;
+  const width = Math.min(410, vw - margin * 2);
+  card.style.width = width + "px";
+  const height = card.offsetHeight;
+  let left = (vw - width) / 2, top = Math.max(margin, (vh - height) / 2);
+  if (step.target) {
+    const box = $(step.target).getBoundingClientRect();
+    ring.style.left = (box.left - 6) + "px"; ring.style.top = (box.top - 6) + "px";
+    ring.style.width = (box.width + 12) + "px"; ring.style.height = (box.height + 12) + "px";
+    left = Math.max(margin, Math.min(vw - width - margin, box.left));
+    top = box.bottom + 20;
+    if (top + height > vh - margin) top = box.top - height - 20;
+    top = Math.max(margin, Math.min(vh - height - margin, top));
+  } else {
+    ring.style.left = (vw / 2 - 20) + "px"; ring.style.top = (vh / 2 - 20) + "px";
+    ring.style.width = "40px"; ring.style.height = "40px";
+  }
+  card.style.left = left + "px"; card.style.top = top + "px";
+}
+function trackTour() {
+  cancelAnimationFrame(tourFrame);
+  tourUntil = performance.now() + 750;
+  const tick = () => { placeTour(); if (tourIndex >= 0 && performance.now() < tourUntil) tourFrame = requestAnimationFrame(tick); };
+  tourFrame = requestAnimationFrame(tick);
+}
+function showTourStep(index) {
+  tourIndex = index;
+  const step = TOUR_STEPS[index];
+  $("tour").hidden = false;
+  $("tour").dataset.guided = String(Boolean(step.target));
+  $("tour-title").textContent = step.title; $("tour-description").textContent = step.text;
+  $("tour-count").textContent = `Quick tour / ${index + 1} of ${TOUR_STEPS.length}`;
+  $("tour-back").hidden = index === 0;
+  $("tour-next").textContent = index === 0 ? "Let’s begin ↗" : index === TOUR_STEPS.length - 1 ? "Got it ✓" : "Next →";
+  $("tour-copy").classList.remove("tour-copy-enter");
+  void $("tour-copy").offsetWidth; $("tour-copy").classList.add("tour-copy-enter");
+  if (step.target) {
+    const behavior = window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "instant" : "smooth";
+    if (window.innerWidth <= 760 && step.target !== "stop") {
+      window.scrollTo({top:Math.max(0, $(step.target).getBoundingClientRect().top + window.scrollY - 90), behavior});
+    } else $(step.target).scrollIntoView({block:"center", behavior});
+  }
+  placeTour(); trackTour();
+  $("tour-next").focus({preventScroll:true});
+}
+function closeTour() {
+  if (tourIndex < 0) return;
+  tourIndex = -1; cancelAnimationFrame(tourFrame); $("tour").hidden = true;
+  if (tourReturnFocus && tourReturnFocus.isConnected) tourReturnFocus.focus({preventScroll:true});
+}
+$("tutorial").addEventListener("click", () => { tourReturnFocus = document.activeElement; showTourStep(0); });
+$("tour-next").addEventListener("click", () => tourIndex === TOUR_STEPS.length - 1 ? closeTour() : showTourStep(tourIndex + 1));
+$("tour-back").addEventListener("click", () => { if (tourIndex > 0) showTourStep(tourIndex - 1); });
+$("tour-close").addEventListener("click", closeTour);
+$("tour-stop").addEventListener("click", () => { closeTour(); stop(); });
+document.addEventListener("scroll", () => { if (tourIndex >= 0) trackTour(); }, true);
+globalThis.addEventListener?.("resize", () => { if (tourIndex >= 0) trackTour(); });
+document.addEventListener("keydown", e => {
+  if (tourIndex < 0) return;
+  if (e.key === "Escape") { closeTour(); return; } // Existing Escape handler still sends STOP.
+  if (e.key !== "Tab") return;
+  const controls = [...$("tour-card").querySelectorAll("button")].filter(b => !b.hidden && !b.disabled);
+  const first = controls[0], last = controls[controls.length - 1];
+  if (e.shiftKey && (document.activeElement === first || !controls.includes(document.activeElement))) { e.preventDefault(); last.focus(); }
+  else if (!e.shiftKey && (document.activeElement === last || !controls.includes(document.activeElement))) { e.preventDefault(); first.focus(); }
+});
+
 setInterval(refresh, 500); refresh();
 </script></body></html>
 """.replace("__STOP_PATTERN__", json.dumps(request_mod.STOP_WORDS.pattern)).replace(

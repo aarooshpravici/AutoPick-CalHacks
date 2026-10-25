@@ -29,3 +29,22 @@ not camera feeds. The handoff screenshot uses a simulated status response.
 - No hardware was connected or moved during these checks.
 
 ![Narrow phone layout](after-small-mobile.png)
+
+## Guided tutorial
+
+The Tutorial button opens a dimmed five-step walkthrough: welcome, Phone option,
+Seated/Standing, tap Phone to start, and STOP. The outline and explanation animate
+between controls. Next/Back/Close are keyboard accessible; Escape retains STOP
+behavior. A STOP control stays available inside the tour. The tour does not start
+requests or change the selected handoff height.
+
+WebKit walkthrough checks passed at 1440, 390 and 320 px: all targets stay outlined
+and unobscured, dialogs stay inside the viewport, no fetch requests are sent,
+Back/Done/Close work, and tutorial STOP reaches the simulated backend. Keyboard
+focus wrapping was checked at 320 px. Reduced-motion CSS disables transitions.
+
+![Tutorial welcome](tutorial-welcome.png)
+
+![Phone explanation on desktop](tutorial-desktop.png)
+
+![Phone explanation on mobile](tutorial-mobile.png)
