@@ -12,6 +12,14 @@ WATCHDOG_S = 0.3
 STATUS_PERIOD_S = 0.1
 
 
+class MotionStopped(RuntimeError):
+    """An outstanding lift movement was abandoned by STOP."""
+
+
+class NoLiftError(RuntimeError):
+    """The connected wheels-only firmware has no lift/load cell."""
+
+
 def finite(value):
     value = float(value)
     if not math.isfinite(value):
@@ -44,6 +52,8 @@ class BaseDriver:
         self._status = None
         self._fault = None
         self._lift_blocked = False
+        self._stop_generation = 0
+        self._stop_acked = 0
         self._closed = threading.Event()
         self._reader = threading.Thread(target=self._read, daemon=True, name="base-status")
         self._reader.start()
@@ -86,7 +96,9 @@ class BaseDriver:
                                                   finite(fields[3]), finite(fields[4]),
                                                   fields[5] == "1", time.monotonic())
                         else:
-                            if line.startswith("ERR "):
+                            if line == "OK STOP":
+                                self._stop_acked += 1
+                            if line.startswith("ERR ") and line != "ERR no lift":
                                 self._fault = RuntimeError(line)
                             self._replies.append(line)
                         self._condition.notify_all()
@@ -122,12 +134,22 @@ class BaseDriver:
             with self._condition:
                 self._healthy()
                 self._replies.clear()
+                generation = self._stop_generation
                 self._send(command)
                 deadline = time.monotonic() + self.timeout
                 while True:
                     self._healthy()
+                    cancelled = command.startswith("LIFT_") and generation != self._stop_generation
+                    if cancelled and self._stop_acked >= self._stop_generation:
+                        raise MotionStopped("lift stopped and holding")
                     while self._replies:
                         reply = self._replies.popleft()
+                        if cancelled:
+                            # Drain through the STOP acknowledgment before another lift
+                            # request can start: late completion replies cannot leak.
+                            continue
+                        if reply == "ERR no lift":
+                            raise NoLiftError(reply)
                         if reply.startswith("ERR "):
                             raise RuntimeError(reply)
                         if matches(reply):
@@ -166,13 +188,20 @@ class BaseDriver:
         self._send(f"DRIVE {left:g} {right:g}")
 
     def stop(self):
-        # Frozen protocol: STOP stops wheels only, not the lift.
-        self._send("STOP")
+        # Bypasses request waits; firmware holds the lift motor enabled.
+        with self._condition:
+            self._stop_generation += 1
+            self._send("STOP")
+            self._condition.notify_all()
 
     def lift_home(self):
         self._lift_blocked = True
         self.stop()
-        self._request("LIFT_HOME", lambda reply: reply == "LIFT_HOMED")
+        try:
+            self._request("LIFT_HOME", lambda reply: reply == "LIFT_HOMED")
+        except NoLiftError:
+            self._lift_blocked = False
+            raise
         self._lift_blocked = False
 
     def lift_to(self, mm):
@@ -182,8 +211,12 @@ class BaseDriver:
         target = f"{mm:g}"
         self._lift_blocked = True
         self.stop()
-        self._request(f"LIFT_TO {target}",
-                      lambda reply: reply.startswith("LIFT_AT ") and finite(reply[8:]) == float(target))
+        try:
+            self._request(f"LIFT_TO {target}",
+                          lambda reply: reply.startswith("LIFT_AT ") and finite(reply[8:]) == float(target))
+        except NoLiftError:
+            self._lift_blocked = False
+            raise
         self._lift_blocked = mm != 0
 
     def tray_grams(self):
@@ -211,16 +244,23 @@ class BaseDriver:
 
 
 class FakeSerial:
-    """In-memory firmware model. Lift completes instantly; drive watchdog is real.
+    """In-memory wheels-only firmware, with an optional simulated stretch lift.
 
     Use an injected monotonic clock for deterministic watchdog tests. This model
     verifies protocol behavior, not lift mechanics or electrical safety.
     """
     def __init__(self, *, max_speed_mm_s=200, max_lift_mm=1000, wheel_diameter_mm=72,
-                 clock=time.monotonic):
+                 clock=time.monotonic, has_lift=False, lift_speed_mm_s=None):
         self.clock = clock
         self.max_speed = max_speed_mm_s
         self.max_lift = max_lift_mm
+        self.has_lift = has_lift
+        self.lift_speed = None if lift_speed_mm_s is None else finite(lift_speed_mm_s)
+        if self.lift_speed is not None and self.lift_speed <= 0:
+            raise ValueError("lift speed must be positive")
+        self.lift_target = None
+        self.lift_enabled = False
+        self._homing = False
         self.steps_per_mm = 1600 / (math.pi * wheel_diameter_mm)
         self.left = self.right = self.lift_mm = self.weight = 0.0
         self.left_steps = self.right_steps = 0.0
@@ -235,12 +275,33 @@ class FakeSerial:
 
     def _tick(self):
         now = self.clock()
+        elapsed = max(0, now - self.last_update)
         moving_dt = max(0, min(now, self.last_drive + WATCHDOG_S) - self.last_update)
         self.left_steps += self.left * moving_dt * self.steps_per_mm
         self.right_steps += self.right * moving_dt * self.steps_per_mm
         self.last_update = now
         if now - self.last_drive >= WATCHDOG_S or self.estop:
             self.left = self.right = 0.0
+        if self.estop:
+            self.lift_target = None
+            self.lift_enabled = False
+            self.homed = False
+        if self.lift_target is not None:
+            delta = self.lift_target - self.lift_mm
+            step = abs(delta) if self.lift_speed is None else self.lift_speed * elapsed
+            self.lift_mm += max(-step, min(step, delta))
+            if self.lift_mm == self.lift_target:
+                if self._homing:
+                    self.homed = True
+                reply = "LIFT_HOMED" if self._homing else f"LIFT_AT {self.lift_mm:g}"
+                self._lines.append((reply + "\n").encode())
+                self.lift_target = None
+
+    def _move_lift(self, height, *, homing=False):
+        self.lift_enabled = True
+        self._homing = homing
+        self.lift_target = height
+        self._tick()
 
     def _status(self):
         return f"STAT {int(self.left_steps)} {int(self.right_steps)} {self.lift_mm:g} {self.weight:g} {int(self.estop)}"
@@ -259,24 +320,27 @@ class FakeSerial:
                     reply = "PONG"
                 elif parts == ["STOP"]:
                     self.left = self.right = 0
+                    self.lift_target = None  # Keep enable and current height: hold.
                     reply = "OK STOP"
+                elif parts and parts[0] in ("TRAY", "TARE", "LIFT_HOME", "LIFT_TO") and not self.has_lift:
+                    reply = "ERR no lift"
                 elif parts == ["TRAY"]:
                     reply = f"TRAY {self.weight:g}"
                 elif parts == ["TARE"]:
                     self.weight = 0
                     reply = "OK TARE"
                 elif parts == ["LIFT_HOME"] and not self.estop:
-                    self.lift_mm, self.homed = 0, True
-                    reply = "LIFT_HOMED"
+                    if self.left or self.right:
+                        raise ValueError("stop wheels before homing")
+                    self._move_lift(0, homing=True)
                 elif len(parts) == 2 and parts[0] == "LIFT_TO" and not self.estop:
                     height = finite(parts[1])
                     if not self.homed or not 0 <= height <= self.max_lift or self.left or self.right:
                         raise ValueError("home lift first or invalid height")
-                    self.lift_mm = height
-                    reply = f"LIFT_AT {height:g}"
+                    self._move_lift(height)
                 elif len(parts) == 3 and parts[0] == "DRIVE" and not self.estop:
                     left, right = finite(parts[1]), finite(parts[2])
-                    if max(abs(left), abs(right)) > self.max_speed or self.lift_mm != 0:
+                    if max(abs(left), abs(right)) > self.max_speed or self.lift_mm != 0 or self.lift_target is not None:
                         raise ValueError("unsafe drive")
                     self.left, self.right, self.last_drive = left, right, self.clock()
                 else:
