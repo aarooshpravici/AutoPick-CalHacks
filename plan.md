@@ -425,7 +425,7 @@ Command line: `python -m arm.pick run [--to hand|tray] [--policy DIR] [--pan DEG
 |---|---|---|
 | `PING` | `PONG` | Link check |
 | `DRIVE <left_mm_s> <right_mm_s>` | (none) | Wheel speeds. **Watchdog: the wheels stop if no DRIVE arrives for 300 ms.** |
-| `STOP` | `OK STOP` | Wheels stop now, and the lift too when it's fitted (agreed in REQ-codex-2) |
+| `STOP` | `OK STOP` | Stop wheels and any fitted lift with quick deceleration; abandon the active lift move and hold its current height (REQ-codex-2) |
 | `LIFT_HOME` | `LIFT_HOMED` | Lower until the bottom switch, zero the position (stretch: lift) |
 | `LIFT_TO <mm>` | `LIFT_AT <mm>` when it arrives | Move the tray to a height above the switch (stretch: lift) |
 | `TRAY` | `TRAY <grams>` | Read the load cell (stretch: lift) |
@@ -434,6 +434,8 @@ Command line: `python -m arm.pick run [--to hand|tray] [--policy DIR] [--pan DEG
 - **Status:** the ESP32 also sends `STAT <left_steps> <right_steps> <lift_mm> <tray_g> <estop>` every 100 ms.
 - **Errors:** sent as `ERR <text>`.
 - **Without the lift:** firmware replies `ERR no lift` to `LIFT_HOME`, `LIFT_TO`, `TRAY` and `TARE`, and `STAT` reports `lift_mm` and `tray_g` as 0.
+- **STOP and hold:** a fitted lift keeps its stepper enabled at its current height. An abandoned `LIFT_TO` does not later send `LIFT_AT`; only a new `LIFT_HOME` or `LIFT_TO` moves it again. The Mac cancels the outstanding lift wait after `OK STOP`. `ERR no lift` is a capability response, not a broken serial link.
+- **Brain STOP:** the page button or the word "stop" sends serial `STOP` and holds the arm (torque stays on), within 0.5 s. A physical E-stop instead cuts 12 V, so a belt lift can slide down; keep hands clear and provide a mechanical bottom stop or friction with HW2.
 - **Steps per mm, drive:** with a 72 mm wheel, 200 steps per turn and 8 microsteps, one step is about 0.14 mm.
 - **Steps per mm, lift (stretch):** 40 mm per turn at 1600 microsteps per turn is 0.025 mm per step.
 
